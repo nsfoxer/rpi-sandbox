@@ -15,6 +15,9 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `RPI_SANDBOX_SOCKET` | broker 的 socket 路径 / 命名管道名 |
 | `RPI_SANDBOX_PROFILE` | 当前 profile 名称（用于日志与展示） |
 | `RPI_SANDBOX_VERSION=1` | 协议版本 |
+| `RPI_SANDBOX_CONFIG` | launcher 使用的全局配置文件（扩展据此编译同一策略） |
+| `RPI_SANDBOX_WRITABLE` | 换行分隔的 `--write` 路径（仅隔离时设置） |
+| `RPI_SANDBOX_PROTECTED` | 换行分隔的 `--protect` 路径（仅隔离时设置） |
 
 扩展启动时：
 

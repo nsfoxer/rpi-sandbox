@@ -125,16 +125,17 @@ core 的 `libc` 仅在 Unix 启用。
 
 **完成标准**：`cargo test` 全绿；`docs/platforms/linux.md` 的验收清单全部打勾。
 
-### Phase 2（扩展）
+### Phase 2（实现完成，交互验收待人工）
 
-- [ ] 读 `RPI_SANDBOX_*`；未隔离提示
-- [ ] `ToolCall` veto：`write`/`edit`/`bash`
-- [ ] `UiDialog`（`purpose: permission`）授权：once/session/directory/reject
-- [ ] 越权写经 broker；`check` 短路
-- [ ] 配置、审计、`/sandbox`、`/sandbox revoke`、`SetStatus`
-- [ ] 测试：TUI 模拟、RPC 前端、headless 拒绝
+- [x] 读 `RPI_SANDBOX_*`；未隔离提示
+- [x] `ToolCall` veto：`write`/`edit`/`bash`
+- [x] `UiDialog`（`purpose: permission`）授权：once/session/directory/reject
+- [x] 越权写经 broker；`check` 短路
+- [x] 配置、审计、`/sandbox`、`/sandbox revoke`、`SetStatus`
+- [x] 测试：策略、授权、headless 拒绝（TUI/RPC 需要宿主级测试）
 
-**完成标准**：交互式可授权写入；`-p` 默认拒绝；扩展只用公开 SDK。
+**完成标准**：交互式可授权写入（待人工）；`-p` 默认拒绝；扩展只用公开 SDK。完成标准中的
+交互项需要在安装了 rpi 且配置了可用 provider 的机器上人工确认。
 
 ### Phase 3 / 4
 

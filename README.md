@@ -35,6 +35,6 @@
 
 ## 当前状态
 
-**Phase 0–1 已完成**：core（策略、协议、审批存储、broker、Landlock）与 Linux launcher
-已实现并通过离线测试。`rpi-sandbox-extension` 目前只有骨架，Phase 2 开始实现。
-见 `docs/roadmap.md`。
+**Phase 0–2 已实现**：core、Linux launcher、扩展（策略 / veto / UiDialog / broker 写入 /
+命令 / 状态）均已完成并通过离线测试。扩展已在 rpi 0.24.0 中实际加载验证；交互式授权
+流程仍需人工验收。macOS / Windows 后端见 Phase 3–4。

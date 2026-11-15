@@ -54,25 +54,27 @@
 
 ## Phase 2：扩展 MVP（3–5 天）
 
+状态：**实现完成**；自动化测试通过，交互式 TUI 验收待人工执行（本仓库无法驱动真实模型会话）。
+
 ### 任务
 
-- [ ] 扩展加载：读 `RPI_SANDBOX_ACTIVE` / `RPI_SANDBOX_SOCKET`；未经过 launcher 时提示
-- [ ] `ToolCall` veto：
+- [x] 扩展加载：读 `RPI_SANDBOX_ACTIVE` / `RPI_SANDBOX_SOCKET`；未经过 launcher 时提示
+- [x] `ToolCall` veto：
   - `write` / `edit`：解析 `path`，按策略判断
-  - `bash`：整进程已隔离，默认放行；可选命令级策略
-- [ ] `UiDialog` 授权：`allow_once` / `allow_always` / 目录授权 / `reject_once`
-- [ ] 越权写：先 `check`，再向 broker 发 `approve` + `write`
-- [ ] 配置：`~/.rpi/agent/sandbox.json` 与 `.rpi/sandbox.json`（只收紧）
-- [ ] 授权持久化：会话内内存；可选把“项目级规则”写入配置（需用户确认）
-- [ ] 审计：策略中的 `auditLog`；broker 写
-- [ ] 命令与状态：`/sandbox`、`/sandbox revoke <path>`、`SetStatus`
-- [ ] 测试：策略、授权、拒绝、headless 拒绝、RPC 前端
+  - `bash`：整进程已隔离，默认放行
+- [x] `UiDialog` 授权：`allow_once` / `allow_always` / 显式目录加宽 / `reject_once`
+- [x] 越权写：先 `check`，再向 broker 发 `approve` + `write`
+- [x] 配置：`~/.rpi/agent/sandbox.json` 与 `.rpi/sandbox.json`（只收紧）；CLI 覆盖经环境变量共享
+- [x] 授权持久化：会话内由 broker 内存持有
+- [x] 审计：策略中的 `auditLog`；broker 写
+- [x] 命令与状态：`/sandbox`、`/sandbox revoke <path>`、`SetStatus`
+- [x] 测试：策略、授权、拒绝、headless 拒绝（TUI/RPC 前端测试需要宿主级测试框架）
 
 ### 验收
 
-- TUI 中越权写弹出授权并可写入；拒绝则不落盘；
-- `-p` 默认拒绝并给出可操作错误；
-- 扩展不依赖 host 私有模块，仅 `rpi-plugin-sdk`。
+- [ ] TUI 中越权写弹出授权并可写入（需要真实交互会话，待人工验收）；
+- [x] headless 默认拒绝并给出可操作错误（`UiDialog` 不可用时拒绝）；
+- [x] 扩展不依赖 host 私有模块，仅 `rpi-plugin-sdk` + `rpi-sandbox-core`。
 
 ## Phase 3：macOS 后端（2–3 天）
 
@@ -124,6 +126,7 @@
 | macOS Seatbelt API deprecated | 未来可能移除 | 隔离封装，保留 `sandbox-exec` 回退 |
 | Windows ACL 残留 / bcrypt 兼容 | 启动失败或权限泄漏 | 事务 + 清理 + crypto provider 切换 |
 | 扩展无法覆盖原生插件 | 边界不完整 | 明确整进程由 launcher 提供 |
+| 越权写由 broker 完成后 veto，模型看到通用 blocked 消息 | 结果展示不精确 | 后续用同名 `write`/`edit` 工具替换，返回真实结果 |
 | 维护者不接受新模式 | 返工 | 先提交短 proposal，再实现 |
 
 ## 交付物
