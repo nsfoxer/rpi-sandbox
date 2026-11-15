@@ -1,0 +1,11 @@
+[package]
+name = "rpi-sandbox-launcher"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Starts rpi inside a whole-process filesystem sandbox"
+
+[dependencies]
+# `rpi-sandbox-core` is added in Phase 1, when the launcher compiles policy and
+# starts the broker.
