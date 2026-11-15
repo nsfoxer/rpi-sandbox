@@ -24,7 +24,7 @@
   │
   ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│ rpi-sandbox launcher                                             │
+│ rpis launcher                                                    │
 │  1. 解析参数 / 读取策略（profile）                                 │
 │  2. 创建监听 socket（Unix socket / Windows 命名管道）              │
 │  3. fork broker（保持在沙箱之外）                                  │

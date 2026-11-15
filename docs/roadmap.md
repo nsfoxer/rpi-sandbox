@@ -35,7 +35,7 @@
 - [x] launcher 参数：
   - `--profile <name>`、`--config <path>`、`--write <dir>`、`--protect <path>`
   - `--mode auto|required`、`--audit <path>`、`--no-broker`
-  - `-- <rpi args...>`
+  - `--rpi <path>`、`--no-extension`、`--`（其余参数直接转给 rpi）
 - [x] 启动顺序：解析 → socket → fork broker → Landlock → `exec`
 - [x] Landlock 计划按 `platforms/linux.md`：ABI 探测、`WRITE/MAKE/REMOVE/REFER/TRUNCATE`
 - [x] broker：单线程服务、授权存储、`check`、写操作、审计
@@ -47,7 +47,7 @@
 
 ### 验收
 
-- [x] `rpi-sandbox --write <tmp> -- <command>` 行为符合预期（测试用 `/bin/sh` 载荷替代 `rpi`，
+- [x] `rpis --write <tmp> -- <command>` 行为符合预期（测试用 `/bin/sh` 载荷替代 `rpi`，
   因为本机未安装 rpi 宿主）；
 - [x] 测试覆盖 `protocol.md` 中的所有写操作（core broker 单元测试）；
 - [x] `mode=required` 在无 Landlock 内核上拒绝启动（单元测试）。
@@ -88,7 +88,7 @@
 
 ### 验收
 
-- macOS 上 `rpi-sandbox -- rpi` 正常工作；
+- macOS 上 `rpis` 正常工作；
 - 越权写被拒，授权经 broker 成功。
 
 ## Phase 4：Windows 后端（3–5 天）

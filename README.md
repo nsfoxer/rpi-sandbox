@@ -20,8 +20,34 @@
 | 组件 | 形态 | 职责 |
 |---|---|---|
 | `rpi-sandbox-core` | 普通库 | 策略模型、路径规则、平台后端（Landlock/Seatbelt/restricted token）、broker、审计 |
-| `rpi-sandbox-launcher` | 二进制 | 读策略 → 建 socket → fork broker → 应用隔离 → `exec rpi` |
+| `rpi-sandbox-launcher` | 二进制 `rpis` | 自动定位并启动 `rpi`：读策略 → 建 socket → fork broker → 应用隔离 → `exec` |
 | `rpi-sandbox-extension` | `cdylib` 扩展 | `ToolCall` veto、`UiDialog` 授权、配置、授权持久化、`/sandbox`、页脚状态 |
+
+## 快速开始
+
+```bash
+cargo build --workspace
+./target/debug/rpis
+```
+
+`rpis` 是一个可直接替代 `rpi` 的入口，不需要再手写 `-- rpi`：
+
+- 按 `--rpi <path>` → `RPI_SANDBOX_RPI` → 同目录 `rpi` → `PATH` 的顺序定位 rpi；
+- 如果同目录存在 `librpi_sandbox_extension.so`（或对应平台的动态库），自动以
+  `--extension <file>` 注入，无需手动安装；
+- 其余参数原样传给 rpi；如果某个参数与 `rpis` 自己的选项同名，用 `--` 强制透传。
+
+```bash
+rpis                                   # 启动 rpi（默认沙箱）
+rpis -p "总结这个仓库"                  # 参数直接转给 rpi
+rpis --write /srv/data --resume        # 额外可写目录 + 恢复会话
+rpis --rpi /opt/rpi/bin/rpi            # 指定 rpi 二进制
+rpis -- --help                         # 查看 rpi 自己的帮助
+rpis --no-extension                    # 不自动加载沙箱扩展
+```
+
+长期使用时，把 `rpis` 和对应动态库放在同一目录，或把扩展安装到
+`~/.rpi/agent/extensions/`。运行后页脚会显示 `🔒 sandbox (<profile>)`。
 
 ## 文档
 
