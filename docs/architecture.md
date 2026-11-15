@@ -93,6 +93,8 @@
 - 越权写：把已批准的路径和操作发给 broker。
 - 审计、`/sandbox`、`/sandbox revoke`、`SetStatus` 页脚状态。
 - 检测 `RPI_SANDBOX_ACTIVE`；未经过 launcher 时提示“未隔离”。
+- `before_agent_start`：把可写根、拒绝语义（`EACCES` 是沙箱而非权限问题）、
+  `write`/`edit` 授权路径和“blocked 可能已写入”写进 system prompt（只追加，不替换）。
 
 ### host（rpi 上游）
 

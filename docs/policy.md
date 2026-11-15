@@ -114,7 +114,28 @@ protected  >  writable  >  默认只读
 **定位**：`protected` 是“永不批准”的授权黑名单，由 broker 强制执行；它不是所有情况下
 的内核只读承诺。真正的嵌套内核只读（userns + 只读 bind + 丢 caps）留在 Phase 5。
 
-## 7. 维护类命令
+## 7. 模型提示（system prompt）
+
+扩展通过 `before_agent_start` 把一段 `## Sandbox (rpi-sandbox)` 追加到 system prompt：
+
+- 列出当前可写根（超过 12 条时折叠为 `+N more`）；
+- 说明越权写的表现是 `EACCES`（“Permission denied” / “权限不够”），这是沙箱策略，
+  不是文件系统、挂载、属主或 ACL 问题，不要用 `sudo`、`chmod`、换路径、软链、
+  `/proc/*/root` 或重复同一写入来“排查”；
+- 说明 `bash` 不能请求授权，越权写要走 `write` / `edit`；授权关闭时明确写“永远拒绝”；
+- 说明 `write`/`edit` 返回 “blocked by `rpi-sandbox-extension`” 时可能已经由 broker 写入，
+  应该用 `read` 确认而不是重试；
+- protected 只给数量，不列路径（`/sandbox` 给用户看完整列表）；
+- 提示 `RPI_SANDBOX_ACTIVE=1`，模型不需要再探测挂载表。
+
+实现约束：
+
+- 只在 `systemPrompt` 非空时追加；空提示词时保持不变，绝不把整段 prompt 替换成沙箱说明；
+- 用标题做幂等标记，`/reload` 不会重复叠加；
+- host 没有该 slot 时跳过，`/sandbox` 显示 `model hint: unsupported by this host`；
+- 这是“告知”，不是强制；真正的边界仍是 Landlock + broker。
+
+## 8. 维护类命令
 
 `install` / `uninstall` / `update` / `auth` / `extension` / `package` / `resource` /
 `events` / `session` / `dev` 由用户主动发起，需要写 `~/.rpi`、`~/.local/bin` 等位置：
@@ -122,7 +143,7 @@ protected  >  writable  >  默认只读
 - launcher 默认**不隔离**这些子命令，并打印一行 `sandbox: bypassed (maintenance command)`；
 - 模型在会话内无法获得同样的绕过能力（沙箱域继承，重新执行 rpi 也无法逃逸）。
 
-## 8. 与其他配置的关系
+## 9. 与其他配置的关系
 
 - `models.json`、插件配置不受影响；它们只读。
 - 会话目录若被自定义到白名单之外，会由扩展/launcher 自动加入可写，否则 rpi 无法写入会话。

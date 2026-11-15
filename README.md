@@ -49,6 +49,16 @@ rpis --no-extension                    # 不自动加载沙箱扩展
 长期使用时，把 `rpis` 和对应动态库放在同一目录，或把扩展安装到
 `~/.rpi/agent/extensions/`。运行后页脚会显示 `🔒 sandbox (<profile>)`。
 
+## 模型能看到什么
+
+扩展通过 `before_agent_start` 在 system prompt 末尾追加一段 `## Sandbox (rpi-sandbox)`：
+可写根、`EACCES`（“权限不够”）代表沙箱拒绝而非权限问题、`bash` 不能走授权、越权写应改用
+`write`/`edit`，以及 `write`/`edit` 返回 blocked 时可能已经由 broker 写入。这样模型不会在
+`date > file` 失败后去查挂载表或反复 `touch`。
+
+提示只是告知：真正的边界仍由 launcher 的 Landlock 域和 broker 提供。host 不支持该钩子时，
+`/sandbox` 会显示 `model hint: unsupported by this host`。
+
 ## 文档
 
 | 文档 | 内容 |
@@ -66,5 +76,5 @@ rpis --no-extension                    # 不自动加载沙箱扩展
 ## 当前状态
 
 **Phase 0–2 已实现**：core、Linux launcher、扩展（策略 / veto / UiDialog / broker 写入 /
-命令 / 状态）均已完成并通过离线测试。扩展已在 rpi 0.24.0 中实际加载验证；交互式授权
-流程仍需人工验收。macOS / Windows 后端见 Phase 3–4。
+命令 / 状态 / 模型提示）均已完成并通过离线测试。扩展已在 rpi 0.24.0 / 0.24.1 中实际加载
+验证；交互式授权流程仍需人工验收。macOS / Windows 后端见 Phase 3–4。

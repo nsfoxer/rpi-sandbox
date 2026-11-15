@@ -132,6 +132,7 @@ core 的 `libc` 仅在 Unix 启用。
 - [x] `UiDialog`（`purpose: permission`）授权：once/session/directory/reject
 - [x] 越权写经 broker；`check` 短路
 - [x] 配置、审计、`/sandbox`、`/sandbox revoke`、`SetStatus`
+- [x] 模型提示：`before_agent_start` 追加沙箱说明（只追加、空 prompt 不覆盖、幂等）
 - [x] 测试：策略、授权、headless 拒绝（TUI/RPC 需要宿主级测试）
 
 **完成标准**：交互式可授权写入（待人工）；`-p` 默认拒绝；扩展只用公开 SDK。完成标准中的
@@ -171,6 +172,15 @@ core 的 `libc` 仅在 Unix 启用。
 
 面向模型/用户的错误要说明：路径、操作、为什么被拒、如何授权。
 参考：`permission_denied` + “Approve interactively or add it to sandbox.writable”。
+
+### 模型提示
+
+- 内核只会返回 `EACCES`，host 也不会把失败的 bash 结果交给 `tool_result` transform，
+  所以“事后解释”不可行；必须在 `before_agent_start` 里提前说明。
+- 该钩子是**替换**语义：读 envelope 的 `systemPrompt`，追加后再返回；为空时保持不变。
+- 用标题 `## Sandbox (rpi-sandbox)` 做幂等，`/reload` 不会叠加。
+- 只列可写根；protected 只给数量，不把 `.ssh`、`.env` 等路径写进提示词。
+- 老 host 的 `PluginApi` 更短：先比较 `struct_size`，缺失时优雅降级。
 
 ## 5. 测试与命令
 

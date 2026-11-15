@@ -67,6 +67,7 @@
 - [x] 配置：`~/.rpi/agent/sandbox.json` 与 `.rpi/sandbox.json`（只收紧）；CLI 覆盖经环境变量共享
 - [x] broker 强制 `protected`：`approve` 与所有变更操作都拒绝，授权不能覆盖
 - [x] 配置形状检查：嵌套 protected / 缺失 inode / allowFileWrites 冲突给出警告，`required` 拒绝
+- [x] 模型提示：`before_agent_start` 追加可写根、`EACCES` 语义与授权路径，避免模型误判为权限问题
 - [x] 授权持久化：会话内由 broker 内存持有
 - [x] 审计：策略中的 `auditLog`；broker 写
 - [x] 命令与状态：`/sandbox`、`/sandbox revoke <path>`、`SetStatus`
