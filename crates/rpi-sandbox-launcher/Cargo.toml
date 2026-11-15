@@ -7,5 +7,11 @@ license.workspace = true
 description = "Starts rpi inside a whole-process filesystem sandbox"
 
 [dependencies]
-# `rpi-sandbox-core` is added in Phase 1, when the launcher compiles policy and
-# starts the broker.
+rpi-sandbox-core = { path = "../rpi-sandbox-core" }
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

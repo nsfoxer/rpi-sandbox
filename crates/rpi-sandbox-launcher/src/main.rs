@@ -1,10 +1,21 @@
 //! `rpi-sandbox` launcher.
 //!
-//! Phase 0 only reserves the crate. Phase 1 adds argument parsing, the broker
-//! socket, the fork, the platform backend, and `exec rpi`. The launcher is the
-//! only component allowed to claim kernel-enforced whole-process isolation.
+//! The launcher is the only component that can claim whole-process isolation:
+//! it compiles the policy, creates the broker socket, forks the unconfined
+//! broker, applies the platform backend to itself, and then `exec`s the target
+//! command. Kernel domains are inherited by every thread, plugin, shell, and
+//! grandchild created afterwards.
 
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
 fn main() {
-    eprintln!("rpi-sandbox: launcher is not implemented yet (Phase 1)");
-    std::process::exit(2);
+    linux::main();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("rpi-sandbox: this build only supports Linux (Phase 1)");
+    std::process::exit(1);
 }

@@ -162,6 +162,12 @@ dependencies = [
 [[package]]
 name = "rpi-sandbox-launcher"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "rpi-sandbox-core",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "rustix"
