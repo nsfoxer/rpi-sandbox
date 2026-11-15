@@ -13,13 +13,15 @@ mod config;
 mod dialog;
 mod gate;
 mod host;
+mod prompt;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use rpi_plugin_sdk::events::{EventView, ToolCall};
 use rpi_plugin_sdk::{
-    callbacks::Output, EventTag, StablePluginEvent, StbString, StbStringRef, EVENT_HANDLER_ABORT,
+    callbacks::Output, EventTag, PluginApi, StablePluginEvent, StbString, StbStringRef,
+    EVENT_HANDLER_ABORT,
 };
 use rpi_sandbox_core::{ApprovalScope, BrokerClient, WriteOp};
 use serde_json::Value;
@@ -33,6 +35,10 @@ pub const CRATE_NAME: &str = "rpi-sandbox-extension";
 struct State {
     config: Config,
     backend: Option<String>,
+    /// Block appended to the system prompt, rendered once at registration.
+    prompt_block: String,
+    /// Whether the host accepted the `before_agent_start` transform.
+    prompt_hint: bool,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -99,7 +105,14 @@ rpi_plugin_sdk::export_plugin!(|api| {
         }
     }
 
-    let _ = STATE.set(State { config, backend });
+    let prompt_block = prompt::render(&config.policy, config.isolated, backend.as_deref());
+    let prompt_hint = register_prompt(&api);
+    let _ = STATE.set(State {
+        config,
+        backend,
+        prompt_block,
+        prompt_hint,
+    });
 
     let Some(register_event) = api.register_event_handler else {
         eprintln!("error: sandbox: host does not support event handlers");
@@ -125,6 +138,70 @@ rpi_plugin_sdk::export_plugin!(|api| {
 
 fn state() -> Option<&'static State> {
     STATE.get()
+}
+
+/// Register the system-prompt transform.
+///
+/// The slot is appended to `PluginApi`, so an older host may hand over a
+/// shorter struct: check `struct_size` before reading it. Returns `false` when
+/// the hint is unavailable, which `/sandbox` reports.
+fn register_prompt(api: &PluginApi) -> bool {
+    let end =
+        std::mem::offset_of!(PluginApi, register_before_agent_start) + std::mem::size_of::<usize>();
+    if (api.struct_size as usize) < end {
+        eprintln!(
+            "warning: sandbox: host predates the prompt transform; the model will not be \
+             told about the sandbox"
+        );
+        return false;
+    }
+    let Some(register) = api.register_before_agent_start else {
+        return false;
+    };
+    let rc = register(
+        on_before_agent_start,
+        rpi_plugin_sdk::callbacks::free_string,
+        std::ptr::null_mut(),
+    );
+    if rc != 0 {
+        eprintln!("warning: sandbox: host rejected the prompt transform (rc={rc})");
+        return false;
+    }
+    true
+}
+
+/// Append the sandbox block to the prompt the host is about to send.
+extern "C" fn on_before_agent_start(
+    event_json: StbStringRef,
+    out: *mut StbString,
+    _user_data: *mut std::ffi::c_void,
+) -> i32 {
+    rpi_plugin_sdk::guard_or(1, || {
+        let Some(state) = state() else {
+            return 0;
+        };
+        // SAFETY: the host keeps the borrowed envelope alive for this call.
+        let envelope = unsafe { event_json.as_str() };
+        let Some(payload) = prompt_patch(envelope, &state.prompt_block) else {
+            return 0;
+        };
+        // SAFETY: `out` is the host-provided output slot, valid for this call.
+        let mut output = unsafe { Output::from_raw(out) };
+        i32::from(!output.write(payload))
+    })
+}
+
+/// Build the `{"systemPrompt": ...}` patch for one `before_agent_start`
+/// envelope.
+///
+/// Returns `None` when the envelope carries no prompt (the transform would
+/// otherwise replace the host's whole system prompt) or when the block is
+/// already present.
+fn prompt_patch(envelope: &str, block: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(envelope).ok()?;
+    let current = parsed.get("systemPrompt")?.as_str()?;
+    let next = prompt::append_once(current, block)?;
+    Some(serde_json::json!({ "systemPrompt": next }).to_string())
 }
 
 extern "C" fn on_session_start(
@@ -320,6 +397,14 @@ fn run_command(args_json: &str) -> String {
     if let Some(backend) = &state.backend {
         description.push_str(&format!("\nbackend: {backend}"));
     }
+    description.push_str(&format!(
+        "\nmodel hint: {}",
+        if state.prompt_hint {
+            "appended to the system prompt"
+        } else {
+            "unsupported by this host"
+        }
+    ));
     description.push_str("\n\ncommands: /sandbox, /sandbox revoke <path>");
     description
 }
@@ -354,6 +439,47 @@ mod tests {
             approval: rpi_sandbox_core::ApprovalSettings::default(),
             audit_log: None,
         }
+    }
+
+    #[test]
+    fn prompt_patch_appends_to_the_host_prompt() {
+        let block = prompt::render(&policy("/work"), true, Some("landlock"));
+        let envelope = serde_json::json!({
+            "prompt": "hello",
+            "systemPrompt": "You are rpi."
+        })
+        .to_string();
+        let patch = prompt_patch(&envelope, &block).unwrap();
+        let parsed: Value = serde_json::from_str(&patch).unwrap();
+        let prompt = parsed["systemPrompt"].as_str().unwrap();
+        assert!(prompt.starts_with("You are rpi.\n\n## Sandbox"));
+        assert!(prompt.contains("- /work"));
+        assert!(prompt.contains("landlock"));
+    }
+
+    #[test]
+    fn prompt_patch_declines_without_an_existing_prompt() {
+        let block = prompt::render(&policy("/work"), true, None);
+        assert!(prompt_patch("{}", &block).is_none());
+        assert!(prompt_patch(r#"{"systemPrompt": ""}"#, &block).is_none());
+        assert!(prompt_patch(r#"{"systemPrompt": 42}"#, &block).is_none());
+        assert!(prompt_patch("not json", &block).is_none());
+    }
+
+    #[test]
+    fn prompt_patch_is_idempotent() {
+        let block = prompt::render(&policy("/work"), true, None);
+        let first = prompt_patch(
+            &serde_json::json!({"systemPrompt": "You are rpi."}).to_string(),
+            &block,
+        )
+        .unwrap();
+        let envelope: Value = serde_json::from_str(&first).unwrap();
+        let second = serde_json::json!({
+            "systemPrompt": envelope["systemPrompt"]
+        })
+        .to_string();
+        assert!(prompt_patch(&second, &block).is_none());
     }
 
     #[test]
