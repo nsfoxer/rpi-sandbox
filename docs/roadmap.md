@@ -65,6 +65,8 @@
 - [x] `UiDialog` 授权：`allow_once` / `allow_always` / 显式目录加宽 / `reject_once`
 - [x] 越权写：先 `check`，再向 broker 发 `approve` + `write`
 - [x] 配置：`~/.rpi/agent/sandbox.json` 与 `.rpi/sandbox.json`（只收紧）；CLI 覆盖经环境变量共享
+- [x] broker 强制 `protected`：`approve` 与所有变更操作都拒绝，授权不能覆盖
+- [x] 配置形状检查：嵌套 protected / 缺失 inode / allowFileWrites 冲突给出警告，`required` 拒绝
 - [x] 授权持久化：会话内由 broker 内存持有
 - [x] 审计：策略中的 `auditLog`；broker 写
 - [x] 命令与状态：`/sandbox`、`/sandbox revoke <path>`、`SetStatus`
@@ -110,6 +112,7 @@
 
 - [ ] 读限制（Landlock `READ_FILE/READ_DIR`、SBPL、ACL）
 - [ ] broker 写入加固：`openat2(RESOLVE_BENEATH)` 消除父目录符号链接竞态
+- [ ] Linux 嵌套内核只读：userns + mount namespace + 只读 bind + 丢 caps（`protected` 透明生效）
 - [ ] 网络限制（Landlock ABI 4+、SBPL、Windows Firewall/WFP）
 - [ ] 进程/执行限制（seccomp、Job Object、SBPL process-exec）
 - [ ] 多 profile 与按项目选择

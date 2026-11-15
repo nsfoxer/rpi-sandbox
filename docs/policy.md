@@ -99,16 +99,20 @@ protected  >  writable  >  默认只读
 
 ## 6. 嵌套保护（已知限制）
 
-内核沙箱（Landlock / Seatbelt / restricted token）只能“累加权限”，不能从已允许的父目录中
-扣除子目录。因此：
+内核沙箱（Landlock）只能“累加权限”，不能从已允许的父目录中扣除子目录。因此：
 
-- `protected` 落在 `writable` 根之外：天然生效（没有规则覆盖它）。
-- `protected` 落在 `writable` 根之内：内核无法排除；启动器/扩展必须
-  - `mode = auto`：明确警告；
+- `protected` 落在 `writable` 根之外：内核本来就拒绝；broker 也拒绝授权；
+- `protected` 与某个规则相同，或某个 writable 规则落在 `protected` 之下：该规则会从
+  Landlock 计划中移除，内核层面生效；
+- `allowFileWrites` 文件被 `protected` 覆盖：该文件规则会被移除，并给出提示；
+- `protected` 落在 `writable` 根之内（且不是同一条规则）：内核无法排除，启动器/扩展：
+  - `mode = auto`：明确警告“只有 broker 写入会被拒绝，`bash` 等仍可直接写”；
   - `mode = required`：拒绝启动；
-  - 或者由扩展在工具层额外拦截（advisory，不覆盖子进程）。
+  - 扩展在工具层额外拦截（advisory，不覆盖子进程）。
+- `protected` 路径不存在：无法绑定 inode；如果它位于 writable 根内，同样警告或拒绝。
 
-后续可通过“枚举可写根的子目录并逐项授权”的方式实现，但需要评估大目录的启动成本。
+**定位**：`protected` 是“永不批准”的授权黑名单，由 broker 强制执行；它不是所有情况下
+的内核只读承诺。真正的嵌套内核只读（userns + 只读 bind + 丢 caps）留在 Phase 5。
 
 ## 7. 维护类命令
 

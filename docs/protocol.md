@@ -64,6 +64,7 @@ launcher 在 `exec rpi` 前设置环境变量：
 - `scope`：`once` | `session`。
 - `recursive`：`true` 表示覆盖 `path` 的子树（目录授权）。
 - 只记录授权，不执行写入。
+- `protected` 路径永远不会被记录：broker 返回 `protected`，即使父目录已有递归授权。
 
 ### `check`
 
@@ -122,6 +123,7 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `not_approved` | 没有对应授权 |
 | `invalid_path` | 非绝对路径 / 无法解析 |
 | `unsafe_path` | 软链或规范化后逃逸 |
+| `protected` | 路径被策略标记为 protected，任何授权都不能覆盖 |
 | `io` | 底层 IO 错误 |
 | `too_large` | 负载超限 |
 | `unsupported` | 未知操作 |
@@ -145,6 +147,9 @@ broker 每处理一个请求追加一行 JSON：
 - socket / 命名管道只允许当前用户访问（Unix 权限 `0600`；Windows 管道 ACL 仅当前用户）。
 - broker 必须重新 `realpath` 并校验路径仍在授权范围内；不信任扩展传来的字符串。
 - broker 在每次变更前重新解析路径，Unix 最终组件使用 `O_NOFOLLOW`。
+- broker 持有 launcher 编译后的 `protected` 列表；`approve` 和所有变更操作都先检查它，
+  授权不能覆盖。
+- 扩展在弹窗前先做一次 protected 判定，减少无效询问；broker 是最终裁决者。
 - **已知限制**：父目录在校验与写入之间被替换为软链的竞态尚未消除，需要
   `openat2(RESOLVE_BENEATH)` 或平台等价机制（见 roadmap Phase 5）。
 - broker 不解析模型输出，只接受结构化路径 + 操作。

@@ -162,6 +162,7 @@ core 的 `libc` 仅在 Unix 启用。
 ### broker
 
 - 只接受绝对路径；`realpath` 后必须仍在授权子树内。
+- 持有 launcher 编译后的 `protected`，`approve` 和所有写操作都先拒绝 protected。
 - 每次写操作前校验授权；`once` 授权用后即焚。
 - 审计失败不能阻止写操作，但要 stderr 警告。
 - 协议版本不匹配直接拒绝，不做兼容猜测。
