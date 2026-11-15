@@ -1,9 +1,13 @@
-# rpi-sandbox（独立工作区）
+# rpi-sandbox（rpi 扩展）
+
+> 本项目是 [bigfish1913/pi-rust](https://github.com/bigfish1913/pi-rust)（`rpi`）的配套扩展：
+> 通过 launcher 在 `exec rpi` 前建立整进程文件系统边界，并以 `rpi-plugin-sdk` 扩展提供
+> 策略、授权、审计与状态。
 
 面向 rpi 的**整进程文件系统沙箱**：`rpi` 本体、所有已加载插件、`bash` 及其子进程都处在
 同一个可写白名单边界内；越权写需要用户授权，并由一个不受限的 broker 代执行。
 
-本仓库只做设计与后续实现，**不修改 rpi 上游的 host 架构**。上游 PR 的结论是：
+本仓库只实现沙箱本身，**不修改 rpi 上游的 host 架构**。上游 PR 的结论是：
 
 - host 保持通用能力；
 - 沙箱策略、配置、授权、审计、命令与状态归扩展；
