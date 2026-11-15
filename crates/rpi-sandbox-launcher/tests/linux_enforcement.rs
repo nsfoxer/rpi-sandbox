@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rpi_sandbox_core::{ApprovalScope, BrokerClient, WriteOp};
 
 fn launcher() -> &'static str {
-    env!("CARGO_BIN_EXE_rpi-sandbox")
+    env!("CARGO_BIN_EXE_rpis")
 }
 
 fn landlock_available() -> bool {
@@ -63,14 +63,17 @@ impl Drop for DeniedDir {
     }
 }
 
-fn shell(script: &str) -> Vec<String> {
-    vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()]
-}
-
 fn run_shell(prefix: &[&str], script: &str) -> Output {
     let mut args: Vec<String> = prefix.iter().map(|value| value.to_string()).collect();
-    args.push("--".to_string());
-    args.extend(shell(script));
+    // Tests drive `/bin/sh` as the "rpi" binary and disable automatic extension
+    // loading so the bundled cdylib does not become a shell argument.
+    args.extend([
+        "--no-extension".to_string(),
+        "--rpi".to_string(),
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+    ]);
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     run(&borrowed)
 }
@@ -163,8 +166,12 @@ fn broker_approves_and_revokes_out_of_policy_writes() {
         profile_file.display()
     );
     let mut command = Command::new(launcher());
-    command.arg("--");
-    command.args(shell(&script));
+    command
+        .arg("--no-extension")
+        .arg("--rpi")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(&script);
     let mut child = command.spawn().expect("spawn launcher");
 
     let socket_path = wait_for_value(&socket_file, Duration::from_secs(5))

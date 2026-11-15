@@ -18,12 +18,20 @@ use rpi_sandbox_core::{
 };
 
 const HELP: &str = "\
-rpi-sandbox — run rpi inside a whole-process filesystem sandbox
+rpis — run rpi inside a whole-process filesystem sandbox
 
 Usage:
-  rpi-sandbox [options] -- <rpi args...>
+  rpis [options] [rpi args...]
+
+The rpi binary is resolved automatically:
+  1. --rpi <path>
+  2. RPI_SANDBOX_RPI
+  3. `rpi` next to this executable
+  4. `rpi` on PATH
 
 Options:
+  --rpi <path>         rpi executable to launch
+  --no-extension       Do not auto-load the bundled sandbox extension
   --profile <name>     Profile label advertised on the broker socket
   --config <path>      Global settings file (default: ~/.rpi/agent/sandbox.json)
   --write <dir>        Extra writable directory (repeatable)
@@ -32,10 +40,17 @@ Options:
   --audit <path>       Broker audit log
   --no-broker          Do not start the approval broker
   --no-sandbox         Run without isolation (explicit bypass)
+  --                   Pass the rest verbatim to rpi
   -h, --help           Show this help
-  -V, --version        Show the version
+  -V, --version        Show the rpis version
 
-The sandbox is opt-in: invoking this launcher is the explicit request. Set
+Examples:
+  rpis
+  rpis -p \"summarize this repository\"
+  rpis --write /srv/data -- rpi --resume
+  rpis -- --help
+
+The sandbox is opt-in: invoking rpis is the explicit request. Set
 RPI_SANDBOX=0 or pass --no-sandbox to bypass it for one run.";
 
 /// Subcommands that legitimately write outside the workspace.
@@ -57,6 +72,8 @@ const MAINTENANCE: [&str; 12] = [
 /// Parsed command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Args {
+    rpi: Option<PathBuf>,
+    no_extension: bool,
     profile: String,
     config: Option<PathBuf>,
     writable: Vec<String>,
@@ -71,6 +88,8 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
+            rpi: None,
+            no_extension: false,
             profile: "default".to_string(),
             config: None,
             writable: Vec::new(),
@@ -109,40 +128,48 @@ pub fn main() {
             return;
         }
         Err(ParseError::Version) => {
-            println!("rpi-sandbox {}", env!("CARGO_PKG_VERSION"));
+            println!("rpis {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         Err(ParseError::Message(message)) => {
-            eprintln!("rpi-sandbox: {message}\n\n{HELP}");
+            eprintln!("rpis: {message}\n\n{HELP}");
             std::process::exit(2);
         }
     };
 
     if let Err(message) = launch(args) {
-        eprintln!("rpi-sandbox: {message}");
+        eprintln!("rpis: {message}");
         std::process::exit(1);
     }
 }
 
 fn launch(args: Args) -> Result<(), String> {
-    if args.target.is_empty() {
-        return Err("no command to run; use `rpi-sandbox [options] -- rpi ...`".to_string());
-    }
     let cwd = std::env::current_dir()
         .map_err(|error| format!("cannot determine the working directory: {error}"))?;
+    let rpi = resolve_rpi(args.rpi.as_deref());
     let (policy, config_path) = build_policy(&args, &cwd)?;
 
     if let Some(reason) = maintenance_bypass(&args.target) {
         eprintln!("sandbox: bypassed ({reason})");
-        return exec_target(&args, false, None, config_path.as_deref());
+        return exec_target(
+            &rpi,
+            &args.target,
+            &args,
+            false,
+            None,
+            config_path.as_deref(),
+        );
     }
+
+    let extension = bundled_extension();
+    let target = inject_extension(&args.target, extension.as_deref(), args.no_extension);
 
     match startup_action(&policy, &probe())? {
         Startup::Unconfined(reason) => {
             if policy.enabled && policy.mode != SandboxMode::Off {
                 eprintln!("sandbox: {reason}; running without isolation");
             }
-            return exec_target(&args, false, None, config_path.as_deref());
+            return exec_target(&rpi, &target, &args, false, None, config_path.as_deref());
         }
         Startup::Isolate => {}
     }
@@ -189,15 +216,31 @@ fn launch(args: Args) -> Result<(), String> {
     // Agent side: apply Landlock after the fork and before exec so the broker
     // stays unconfined and the domain covers every future thread and child.
     match linux::plan(&policy).and_then(|plan| linux::apply(&plan)) {
-        Ok(()) => exec_target(&args, true, socket.as_deref(), config_path.as_deref()),
+        Ok(()) => exec_target(
+            &rpi,
+            &target,
+            &args,
+            true,
+            socket.as_deref(),
+            config_path.as_deref(),
+        ),
         Err(error) => {
             if policy.mode == SandboxMode::Required {
                 return Err(format!("cannot apply the filesystem sandbox: {error}"));
             }
             eprintln!("warning: {error}; running without a sandbox");
-            exec_target(&args, false, None, config_path.as_deref())
+            exec_target(&rpi, &target, &args, false, None, config_path.as_deref())
         }
     }
+}
+
+fn take_value<I: Iterator<Item = OsString>>(
+    iter: &mut I,
+    name: &str,
+) -> Result<String, ParseError> {
+    iter.next()
+        .map(|value| value.to_string_lossy().into_owned())
+        .ok_or_else(|| ParseError::Message(format!("{name} requires a value")))
 }
 
 fn parse_args<I: Iterator<Item = OsString>>(args: I) -> Result<Args, ParseError> {
@@ -209,27 +252,19 @@ fn parse_args<I: Iterator<Item = OsString>>(args: I) -> Result<Args, ParseError>
             parsed.target = iter
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect();
-            if parsed.target.is_empty() {
-                return Err(ParseError::Message(
-                    "expected a command after `--`".to_string(),
-                ));
-            }
             return Ok(parsed);
         }
-        let mut value = |name: &str| -> Result<String, ParseError> {
-            iter.next()
-                .map(|value| value.to_string_lossy().into_owned())
-                .ok_or_else(|| ParseError::Message(format!("{name} requires a value")))
-        };
         match text.as_str() {
             "-h" | "--help" => return Err(ParseError::Help),
             "-V" | "--version" => return Err(ParseError::Version),
-            "--profile" => parsed.profile = value("--profile")?,
-            "--config" => parsed.config = Some(PathBuf::from(value("--config")?)),
-            "--write" => parsed.writable.push(value("--write")?),
-            "--protect" => parsed.protected.push(value("--protect")?),
+            "--rpi" => parsed.rpi = Some(PathBuf::from(take_value(&mut iter, "--rpi")?)),
+            "--no-extension" => parsed.no_extension = true,
+            "--profile" => parsed.profile = take_value(&mut iter, "--profile")?,
+            "--config" => parsed.config = Some(PathBuf::from(take_value(&mut iter, "--config")?)),
+            "--write" => parsed.writable.push(take_value(&mut iter, "--write")?),
+            "--protect" => parsed.protected.push(take_value(&mut iter, "--protect")?),
             "--mode" => {
-                let mode = value("--mode")?;
+                let mode = take_value(&mut iter, "--mode")?;
                 parsed.mode = Some(match mode.as_str() {
                     "auto" => SandboxMode::Auto,
                     "required" => SandboxMode::Required,
@@ -241,34 +276,99 @@ fn parse_args<I: Iterator<Item = OsString>>(args: I) -> Result<Args, ParseError>
                     }
                 });
             }
-            "--audit" => parsed.audit = Some(PathBuf::from(value("--audit")?)),
+            "--audit" => parsed.audit = Some(PathBuf::from(take_value(&mut iter, "--audit")?)),
             "--no-broker" => parsed.broker = false,
             "--broker" => parsed.broker = true,
             "--no-sandbox" => parsed.enabled = Some(false),
             "--sandbox" => parsed.enabled = Some(true),
-            other if other.starts_with('-') => {
-                return Err(ParseError::Message(format!("unknown option `{other}`")))
-            }
+            // Everything from the first unrecognized argument onwards belongs
+            // to rpi, so `rpis -p "..."` works without a `--` separator.
             other => {
-                return Err(ParseError::Message(format!(
-                    "unexpected argument `{other}`; pass the command after `--`"
-                )))
+                parsed.target.push(other.to_string());
+                parsed
+                    .target
+                    .extend(iter.map(|value| value.to_string_lossy().into_owned()));
+                return Ok(parsed);
             }
         }
     }
-    Err(ParseError::Message(
-        "missing `--` and the command to run".to_string(),
-    ))
+    Ok(parsed)
 }
 
 fn maintenance_bypass(target: &[String]) -> Option<&'static str> {
-    // `-- <program> <subcommand> ...`: the subcommand is the first argument
-    // after the executable. Checking flags would require knowing rpi's entire
-    // option grammar; maintenance commands are always first.
-    let first = target.get(1)?;
+    // `rpis <subcommand> ...`: maintenance commands are the first rpi argument.
+    let first = target.first()?;
     MAINTENANCE
         .contains(&first.as_str())
         .then_some("maintenance command")
+}
+
+/// Resolve the rpi executable to launch.
+fn resolve_rpi(explicit: Option<&Path>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path.to_path_buf();
+    }
+    if let Some(path) = std::env::var_os("RPI_SANDBOX_RPI") {
+        return PathBuf::from(path);
+    }
+    if let Some(sibling) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("rpi")))
+    {
+        if is_executable(&sibling) {
+            return sibling;
+        }
+    }
+    PathBuf::from("rpi")
+}
+
+fn is_executable(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
+/// The extension shipped next to the launcher, if the build produced one.
+fn bundled_extension() -> Option<PathBuf> {
+    let name = if cfg!(target_os = "macos") {
+        "librpi_sandbox_extension.dylib"
+    } else if cfg!(target_os = "windows") {
+        "rpi_sandbox_extension.dll"
+    } else {
+        "librpi_sandbox_extension.so"
+    };
+    let path = std::env::current_exe().ok()?.parent()?.join(name);
+    path.is_file().then_some(path)
+}
+
+/// Prepend an explicit `--extension` for the bundled cdylib.
+///
+/// Skipped when the user turned off extensions, loaded their own extension, or
+/// disabled auto-loading. This keeps `rpis` a drop-in replacement for `rpi`.
+fn inject_extension(target: &[String], extension: Option<&Path>, disabled: bool) -> Vec<String> {
+    let Some(extension) = extension else {
+        return target.to_vec();
+    };
+    if disabled || target_requests_extensions(target) {
+        return target.to_vec();
+    }
+    let mut args = vec![
+        "--extension".to_string(),
+        extension.to_string_lossy().into_owned(),
+    ];
+    args.extend_from_slice(target);
+    args
+}
+
+fn target_requests_extensions(target: &[String]) -> bool {
+    target.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--no-extensions" | "-ne" | "--extension" | "-e" | "--extensions-dir" | "-ed"
+        ) || arg.starts_with("--extension=")
+            || arg.starts_with("--extensions-dir=")
+    })
 }
 
 fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<PathBuf>), String> {
@@ -531,13 +631,15 @@ fn exit_code(status: i32) -> i32 {
 /// When `applied` is false every sandbox variable is removed so the extension
 /// cannot mistake an unconfined process for an isolated one.
 fn exec_target(
+    rpi: &Path,
+    target: &[String],
     args: &Args,
     applied: bool,
     socket: Option<&Path>,
     config: Option<&Path>,
 ) -> Result<(), String> {
-    let mut command = Command::new(&args.target[0]);
-    command.args(&args.target[1..]);
+    let mut command = Command::new(rpi);
+    command.args(target);
     for name in [
         env::ACTIVE,
         env::SOCKET,
@@ -568,7 +670,7 @@ fn exec_target(
         command.env(env::CONFIG, config);
     }
     let error = command.exec();
-    Err(format!("cannot exec {}: {error}", args.target[0]))
+    Err(format!("cannot exec {}: {error}", rpi.display()))
 }
 
 #[cfg(test)]
@@ -595,6 +697,9 @@ mod tests {
     #[test]
     fn parses_documented_options() {
         let parsed = args(&[
+            "--rpi",
+            "/usr/bin/rpi",
+            "--no-extension",
             "--profile",
             "work",
             "--write",
@@ -608,51 +713,118 @@ mod tests {
             "--audit",
             "/tmp/audit.jsonl",
             "--no-broker",
-            "--",
-            "rpi",
             "-p",
             "hello",
         ])
         .unwrap();
+        assert_eq!(parsed.rpi, Some(PathBuf::from("/usr/bin/rpi")));
+        assert!(parsed.no_extension);
         assert_eq!(parsed.profile, "work");
         assert_eq!(parsed.writable, ["/srv/data", "/tmp/out"]);
         assert_eq!(parsed.protected, ["/srv/secrets"]);
         assert_eq!(parsed.mode, Some(SandboxMode::Required));
         assert_eq!(parsed.audit, Some(PathBuf::from("/tmp/audit.jsonl")));
         assert!(!parsed.broker);
-        assert_eq!(parsed.target, ["rpi", "-p", "hello"]);
+        // `-p` is not a launcher option, so everything from there goes to rpi.
+        assert_eq!(parsed.target, ["-p", "hello"]);
     }
 
     #[test]
-    fn requires_the_separator_and_a_command() {
-        assert!(matches!(
-            args(&["--profile", "x"]),
-            Err(ParseError::Message(_))
-        ));
-        assert!(matches!(args(&["--"]), Err(ParseError::Message(_))));
+    fn rpis_alone_is_valid() {
+        assert_eq!(args(&[]).unwrap().target, Vec::<String>::new());
+        assert_eq!(
+            args(&["--profile", "x"]).unwrap().target,
+            Vec::<String>::new()
+        );
         assert!(matches!(args(&["--write"]), Err(ParseError::Message(_))));
     }
 
     #[test]
-    fn unknown_options_fail_closed() {
-        assert!(matches!(
-            args(&["--allow-everything", "--", "rpi"]),
-            Err(ParseError::Message(_))
-        ));
+    fn unknown_arguments_start_the_rpi_command_line() {
+        let parsed = args(&["--allow-everything", "value", "-p", "hi"]).unwrap();
+        assert_eq!(parsed.target, ["--allow-everything", "value", "-p", "hi"]);
+    }
+
+    #[test]
+    fn double_dash_forwards_verbatim() {
+        let parsed = args(&["--write", "/srv/data", "--", "--sandbox", "-p", "hi"]).unwrap();
+        assert_eq!(parsed.writable, ["/srv/data"]);
+        assert_eq!(parsed.target, ["--sandbox", "-p", "hi"]);
     }
 
     #[test]
     fn maintenance_commands_bypass() {
         for command in MAINTENANCE {
             assert_eq!(
-                maintenance_bypass(&["rpi".to_string(), command.to_string()]),
+                maintenance_bypass(&[command.to_string()]),
                 Some("maintenance command"),
                 "{command} must bypass"
             );
         }
         assert_eq!(
-            maintenance_bypass(&["rpi".to_string(), "-p".to_string(), "hi".to_string()]),
+            maintenance_bypass(&["-p".to_string(), "hi".to_string()]),
             None
+        );
+        assert_eq!(
+            maintenance_bypass(&["--local-only".to_string(), "install".to_string()]),
+            None,
+            "only the first rpi argument selects a subcommand"
+        );
+    }
+
+    #[test]
+    fn bundled_extension_is_injected_before_rpi_arguments() {
+        let target = vec!["-p".to_string(), "hi".to_string()];
+        let extension = Path::new("/opt/rpis/librpi_sandbox_extension.so");
+        assert_eq!(
+            inject_extension(&target, Some(extension), false),
+            [
+                "--extension",
+                "/opt/rpis/librpi_sandbox_extension.so",
+                "-p",
+                "hi"
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_injection_respects_explicit_choices() {
+        let target = vec!["-p".to_string()];
+        let extension = Path::new("/opt/rpis/librpi_sandbox_extension.so");
+        assert_eq!(
+            inject_extension(&target, Some(extension), true),
+            target,
+            "--no-extension disables auto-loading"
+        );
+        for flag in [
+            "--no-extensions",
+            "-ne",
+            "-e",
+            "--extension",
+            "--extensions-dir",
+            "-ed",
+            "--extension=/tmp/x.so",
+            "--extensions-dir=/tmp/plugins",
+        ] {
+            let with_flag = vec![flag.to_string()];
+            assert_eq!(
+                inject_extension(&with_flag, Some(extension), false),
+                with_flag,
+                "{flag} must suppress the bundled extension"
+            );
+        }
+        assert_eq!(
+            inject_extension(&target, None, false),
+            target,
+            "no bundled extension means nothing to inject"
+        );
+    }
+
+    #[test]
+    fn explicit_rpi_path_wins() {
+        assert_eq!(
+            resolve_rpi(Some(Path::new("/custom/rpi"))),
+            PathBuf::from("/custom/rpi")
         );
     }
 

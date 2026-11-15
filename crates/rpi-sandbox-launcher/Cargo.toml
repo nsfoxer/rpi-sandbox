@@ -7,7 +7,7 @@ license.workspace = true
 description = "Starts rpi inside a whole-process filesystem sandbox"
 
 [[bin]]
-name = "rpi-sandbox"
+name = "rpis"
 path = "src/main.rs"
 
 [dependencies]
