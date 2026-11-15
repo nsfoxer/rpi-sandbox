@@ -5,23 +5,26 @@
 
 ## Phase 0：工作区、契约与代码搬迁（1–2 天）
 
+状态：**已完成**。
+
 ### 任务
 
-- [ ] 建立 Cargo workspace：`rpi-sandbox-core`、`rpi-sandbox-launcher`、`rpi-sandbox-extension`
-- [ ] 从已关闭的 host 分支（`feat/fs-sandbox`）迁入：
+- [x] 建立 Cargo workspace：`rpi-sandbox-core`、`rpi-sandbox-launcher`、`rpi-sandbox-extension`
+- [x] 从已关闭的 host 分支（`feat/fs-sandbox`）迁入：
   - `policy.rs`（规则、展开、优先级、项目收紧）
   - `linux.rs`（Landlock 计划与执行）
   - `broker.rs`（审批存储、协议、审计）
   - `approval.rs`（数据类型）
-- [ ] 把 broker 协议按 `protocol.md` 定稿（加 `hello`、`v`、错误码）
-- [ ] 编写 `docs/architecture.md`、`policy.md`、`protocol.md` 的最终版本
-- [ ] 增加协议序列化测试与策略单元测试
+  - `probe.rs`（Landlock ABI 探测，`linux.rs` 依赖）
+- [x] 把 broker 协议按 `protocol.md` 定稿（加 `hello`、`v`、错误码、绝对路径校验、授权复检）
+- [x] 编写 `docs/architecture.md`、`policy.md`、`protocol.md` 的最终版本
+- [x] 增加协议序列化测试与策略单元测试
 
 ### 验收
 
-- `cargo test -p rpi-sandbox-core` 全绿；
-- 协议请求/响应 round-trip 测试通过；
-- 文档中的路径、变量名与实际代码一致。
+- [x] `cargo test -p rpi-sandbox-core` 全绿（73 个单元测试 + 2 个 Landlock 集成测试）；
+- [x] 协议请求/响应 round-trip 测试通过；
+- [x] 文档中的路径、变量名与实际代码一致。
 
 ## Phase 1：Linux launcher MVP（3–5 天）
 
@@ -101,6 +104,7 @@
 ## Phase 5：加固与扩展（持续）
 
 - [ ] 读限制（Landlock `READ_FILE/READ_DIR`、SBPL、ACL）
+- [ ] broker 写入加固：`openat2(RESOLVE_BENEATH)` 消除父目录符号链接竞态
 - [ ] 网络限制（Landlock ABI 4+、SBPL、Windows Firewall/WFP）
 - [ ] 进程/执行限制（seccomp、Job Object、SBPL process-exec）
 - [ ] 多 profile 与按项目选择

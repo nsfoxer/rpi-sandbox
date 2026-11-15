@@ -39,7 +39,8 @@ launcher 在 `exec rpi` 前设置环境变量：
 
 - `id`：客户端自增，响应必须回显。
 - 同一连接上的请求按顺序处理；扩展内部需要用互斥锁串行化。
-- 字符串长度上限、单次数据大小上限由实现定义（建议 16 MiB），超限返回 `too_large`。
+- 单帧（含 base64 与 JSON 外壳）上限为 16 MiB + 编码开销；单次解码后的数据上限为
+  16 MiB。超限返回 `too_large`，并丢弃该行以保持分帧。
 
 ## 3. 操作
 
@@ -49,7 +50,7 @@ launcher 在 `exec rpi` 前设置环境变量：
 {"v":1,"id":1,"op":"hello","client":"rpi-sandbox-extension","version":"0.1.0"}
 ```
 
-响应：`{"ok":true,"sandbox":"landlock","profile":"default"}`
+响应：`{"v":1,"id":1,"ok":true,"sandbox":"landlock","profile":"default"}`
 
 ### `approve`
 
@@ -123,6 +124,7 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `unsupported` | 未知操作 |
 | `version` | 协议版本不匹配 |
 | `internal` | broker 内部错误（保留） |
+| `timeout` | 请求超时 |
 
 ## 5. 审计
 
@@ -139,6 +141,9 @@ broker 每处理一个请求追加一行 JSON：
 
 - socket / 命名管道只允许当前用户访问（Unix 权限 `0600`；Windows 管道 ACL 仅当前用户）。
 - broker 必须重新 `realpath` 并校验路径仍在授权范围内；不信任扩展传来的字符串。
+- broker 在每次变更前重新解析路径，Unix 最终组件使用 `O_NOFOLLOW`。
+- **已知限制**：父目录在校验与写入之间被替换为软链的竞态尚未消除，需要
+  `openat2(RESOLVE_BENEATH)` 或平台等价机制（见 roadmap Phase 5）。
 - broker 不解析模型输出，只接受结构化路径 + 操作。
 - 扩展的授权决定来自前端（TUI/RPC/ACP），不由模型文本直接触发。
 

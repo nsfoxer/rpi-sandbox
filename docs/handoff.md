@@ -29,14 +29,26 @@
 
 ## 1. 工作区
 
-尚未创建。建议：
+已创建（Phase 0）：
+
+```text
+sandbox/
+├── Cargo.toml                 # workspace，edition 2021，rust-version 1.88
+├── crates/
+│   ├── rpi-sandbox-core/      # policy / path / protocol / broker / probe / linux
+│   ├── rpi-sandbox-launcher/  # bin；Phase 1 实现
+│   └── rpi-sandbox-extension/ # cdylib；Phase 2 实现
+└── docs/
+```
+
+初始命令（记录用）：
 
 ```bash
 cd /var/home/nsfoxer/桌面/src/rpi/sandbox
 git init
 cargo new --lib crates/rpi-sandbox-core
 cargo new --bin crates/rpi-sandbox-launcher
-cargo new --lib crates/rpi-sandbox-extension   # crate-type = ["cdylib"]，见下
+cargo new --lib crates/rpi-sandbox-extension   # crate-type = ["cdylib"]
 ```
 
 根 `Cargo.toml`：
@@ -63,13 +75,15 @@ license = "MIT"
 crate-type = ["cdylib"]
 
 [dependencies]
-rpi-plugin-sdk = "0.24"   # 与目标宿主版本一致；开发期可用 path 指向 pi-rust checkout
+rpi-plugin-sdk = "0.24"   # 公开 SDK，与目标宿主版本一致
+rpi-sandbox-core = { path = "../rpi-sandbox-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ```
 
-launcher 依赖 core；core 依赖平台 crate（`libc` 仅 Linux/macOS，`windows-sys` 仅 Windows，
-按 target 配置）。
+扩展可以依赖自有的 `rpi-sandbox-core`（共享 policy/protocol 类型）；硬约束是
+**core 不依赖任何 `rpi-*` crate**，扩展不依赖 host 私有模块。launcher 依赖 core；
+core 的 `libc` 仅在 Unix 启用。
 
 ## 2. 可复用的现有代码
 
@@ -82,7 +96,9 @@ launcher 依赖 core；core 依赖平台 crate（`libc` 仅 Linux/macOS，`windo
 | `crates/rpi-sandbox/src/linux.rs` | core | Landlock 计划与 `apply`；ABI 掩码、`ref/truncate` |
 | `crates/rpi-sandbox/src/broker.rs` | core | 审批存储、协议、审计、客户端 |
 | `crates/rpi-sandbox/src/approval.rs` | core | 数据类型（可精简） |
+| `crates/rpi-sandbox/src/probe.rs` | core | 平台能力探测；`linux.rs` 依赖 Landlock ABI 查询 |
 | `crates/rpi-cli/src/sandbox.rs` | launcher + extension | 启动顺序、绕过、回退、状态 |
+| `crates/rpi-cli/src/sandbox_approval.rs` | 删除 | TUI 审批桥；由扩展的 `UiDialog` 取代 |
 | `crates/rpi-cli/src/interactive_tui/extensions.rs`（审批对话框） | 删除 | 由扩展的 `UiDialog` 取代 |
 | `crates/rpi-tools/src/error.rs` 的提示 | 可选 | 扩展侧生成更清晰的错误即可 |
 
@@ -90,13 +106,13 @@ launcher 依赖 core；core 依赖平台 crate（`libc` 仅 Linux/macOS，`windo
 
 ## 3. 分阶段任务
 
-### Phase 0（先做）
+### Phase 0（已完成）
 
-- [ ] 建 workspace 与三个 crate 骨架
-- [ ] 迁入策略与 broker 代码，去掉对 `rpi-*` 的依赖
-- [ ] 按 `protocol.md` 修改协议：加 `v`、`hello`、错误码、权限校验
-- [ ] 单元测试：规则优先级、展开、项目收紧、协议 round-trip、审批存储
-- [ ] 在本目录 `git commit`（建议 `feat(core): ...`）
+- [x] 建 workspace 与三个 crate 骨架
+- [x] 迁入策略与 broker 代码，去掉对 `rpi-*` 的依赖
+- [x] 按 `protocol.md` 修改协议：加 `v`、`hello`、错误码、绝对路径与授权复检
+- [x] 单元测试：规则优先级、展开、项目收紧、协议 round-trip、审批存储
+- [x] 在本目录 `git commit`（建议 `feat(core): ...`）
 
 **完成标准**：`cargo test -p rpi-sandbox-core` 全绿；文档与代码一致。
 

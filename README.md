@@ -35,5 +35,6 @@
 
 ## 当前状态
 
-**设计阶段**。代码从已关闭的 host PR（`feat/fs-sandbox`）中迁移，见
-`docs/roadmap.md` 的 Phase 0。
+**Phase 0 已完成**：工作区、协议、策略、审批存储、Landlock 计划与 broker 均已迁入并通过
+离线测试；`rpi-sandbox-launcher` 与 `rpi-sandbox-extension` 目前只有骨架，分别从
+Phase 1 / Phase 2 开始实现。见 `docs/roadmap.md`。
