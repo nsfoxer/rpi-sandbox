@@ -124,6 +124,18 @@ pub fn build_plan(policy: &SandboxPolicy, abi: u32) -> LandlockPlan {
         .iter()
         .chain(policy.allow_file_writes.iter())
     {
+        // `protected` always wins. When a rule is *under* a protected path the
+        // rule can simply be omitted, which turns `protected` into real kernel
+        // enforcement for that subtree. A protected path nested inside a
+        // writable directory cannot be subtracted here; `protection_gaps`
+        // reports it to the user instead.
+        if policy
+            .protected
+            .iter()
+            .any(|protected| protected.matches(rule.path()))
+        {
+            continue;
+        }
         let (path, access) = match rule {
             PathRule::Dir(path) => (path, handled),
             // A file rule may only grant write/truncate; `MAKE_*`, `REMOVE_*`
@@ -267,7 +279,8 @@ impl Drop for FdGuard {
 mod tests {
     use super::*;
     use crate::policy::{
-        compile_policy, PolicyContext, PolicyOverrides, SandboxMode, SandboxSettings,
+        compile_policy, ApprovalSettings, PolicyContext, PolicyOverrides, SandboxMode,
+        SandboxSettings,
     };
 
     fn policy_for(settings: &SandboxSettings) -> SandboxPolicy {
@@ -347,6 +360,63 @@ mod tests {
                 == std::path::Path::new("/definitely/not/present/rpi-sandbox")));
         assert!(!plan.rules.iter().any(|rule| rule.path.as_path()
             == std::path::Path::new("/definitely/not/present/rpi-sandbox")));
+    }
+
+    #[test]
+    fn protected_rules_are_not_granted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let child = root.join("writable");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let policy = SandboxPolicy {
+            enabled: true,
+            mode: SandboxMode::Auto,
+            writable: vec![
+                PathRule::Dir(normalize_path(&child)),
+                PathRule::Dir(std::path::PathBuf::from("/tmp")),
+            ],
+            protected: vec![PathRule::Dir(normalize_path(root))],
+            allow_file_writes: Vec::new(),
+            approval: ApprovalSettings::default(),
+            audit_log: None,
+        };
+        let plan = build_plan(&policy, 6);
+        assert!(
+            !plan
+                .rules
+                .iter()
+                .any(|rule| rule.path == normalize_path(&child)),
+            "a writable rule under protected must be dropped"
+        );
+        assert!(
+            plan.rules
+                .iter()
+                .any(|rule| rule.path == std::path::PathBuf::from("/tmp")),
+            "unrelated writable roots stay"
+        );
+
+        let policy = SandboxPolicy {
+            enabled: true,
+            mode: SandboxMode::Auto,
+            writable: Vec::new(),
+            protected: vec![PathRule::File(std::path::PathBuf::from("/dev/null"))],
+            allow_file_writes: vec![PathRule::File(std::path::PathBuf::from("/dev/null"))],
+            approval: ApprovalSettings::default(),
+            audit_log: None,
+        };
+        let plan = build_plan(&policy, 6);
+        assert!(
+            !plan
+                .rules
+                .iter()
+                .any(|rule| rule.path == std::path::PathBuf::from("/dev/null")),
+            "allowFileWrites covered by protected must not be granted"
+        );
+    }
+
+    fn normalize_path(path: &std::path::Path) -> PathBuf {
+        crate::path::normalize_and_resolve(path)
     }
 
     #[test]

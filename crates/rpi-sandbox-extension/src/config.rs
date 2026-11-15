@@ -107,7 +107,11 @@ impl Config {
                 .unwrap_or_else(|| "unavailable".to_string())
         );
         if let Some(path) = &self.config_path {
-            out.push_str(&format!("\nconfig: {}", path.display()));
+            if path.exists() {
+                out.push_str(&format!("\nconfig: {}", path.display()));
+            } else {
+                out.push_str("\nconfig: none (built-in defaults)");
+            }
         }
         out.push_str("\n\nwritable:");
         for rule in &self.policy.writable {
@@ -121,15 +125,11 @@ impl Config {
                 out.push_str(&format!("\n  {}", rule.path().display()));
             }
         }
-        let nested = self.policy.nested_protected();
-        if !nested.is_empty() {
-            out.push_str("\n\nnested (not kernel-enforced):");
-            for (protected, writable) in nested {
-                out.push_str(&format!(
-                    "\n  {} inside {}",
-                    protected.display(),
-                    writable.display()
-                ));
+        let gaps = self.policy.protection_gaps();
+        if !gaps.is_empty() {
+            out.push_str("\n\nwarnings:");
+            for gap in gaps {
+                out.push_str(&format!("\n  {}", gap.describe()));
             }
         }
         out
@@ -258,6 +258,41 @@ mod tests {
     fn extension_policy_is_disabled_without_the_launcher() {
         let policy = compile(None, None, false, Path::new("/work"), &[], &[], None, None);
         assert!(!policy.enabled);
+    }
+
+    #[test]
+    fn describe_reports_unenforceable_protection() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        let policy = rpi_sandbox_core::SandboxPolicy {
+            enabled: true,
+            mode: rpi_sandbox_core::SandboxMode::Auto,
+            writable: vec![rpi_sandbox_core::PathRule::Dir(
+                rpi_sandbox_core::normalize_and_resolve(dir.path()),
+            )],
+            protected: vec![rpi_sandbox_core::PathRule::Dir(
+                rpi_sandbox_core::normalize_and_resolve(&secrets),
+            )],
+            allow_file_writes: Vec::new(),
+            approval: rpi_sandbox_core::ApprovalSettings::default(),
+            audit_log: None,
+        };
+        let config = Config {
+            isolated: true,
+            socket: None,
+            profile: "default".to_string(),
+            config_path: Some(dir.path().join("missing.json")),
+            cwd: dir.path().to_path_buf(),
+            policy,
+        };
+        assert!(config
+            .describe()
+            .contains("config: none (built-in defaults)"));
+        assert!(config.describe().contains("warnings:"));
+        assert!(config
+            .describe()
+            .contains("bash and other tools can still write"));
     }
 
     #[test]

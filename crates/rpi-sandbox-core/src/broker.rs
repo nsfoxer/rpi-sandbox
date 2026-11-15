@@ -27,6 +27,7 @@ use base64::Engine;
 
 use crate::approval::{ApprovalScope, WriteOp};
 use crate::path::{absolute_lexical, normalize_and_resolve};
+use crate::policy::PathRule;
 use crate::protocol::{
     read_frame, BrokerError, ErrorCode, Frame, Operation, Request, Response, DEFAULT_MAX_PAYLOAD,
     OPERATION_NAMES, PROTOCOL_VERSION,
@@ -41,6 +42,8 @@ pub struct BrokerConfig {
     pub backend: Option<String>,
     /// Profile name reported by `hello`.
     pub profile: Option<String>,
+    /// Paths that can never be approved or written, even with a user grant.
+    pub protected: Vec<PathRule>,
     /// Maximum decoded payload size, in bytes.
     pub max_payload: usize,
 }
@@ -51,6 +54,7 @@ impl Default for BrokerConfig {
             audit: None,
             backend: None,
             profile: None,
+            protected: Vec::new(),
             max_payload: DEFAULT_MAX_PAYLOAD,
         }
     }
@@ -332,6 +336,7 @@ fn dispatch(
             recursive,
         } => {
             let (_, resolved) = parse_request_path(&path)?;
+            reject_protected(config, &resolved, "approval")?;
             if operations.is_empty() {
                 return Err(BrokerError::new(
                     ErrorCode::Internal,
@@ -343,11 +348,13 @@ fn dispatch(
         }
         Operation::Check { path, operation } => {
             let (lexical, resolved) = parse_request_path(&path)?;
+            reject_protected(config, &resolved, "check")?;
             let scope = assess(store, &lexical, &resolved, operation)?;
             Ok(scope)
         }
         Operation::Write { path, data, append } => {
             let (lexical, resolved) = parse_request_path(&path)?;
+            reject_protected(config, &resolved, "write")?;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data.as_bytes())
                 .map_err(|error| {
@@ -379,6 +386,7 @@ fn dispatch(
         }
         Operation::Truncate { path, len } => {
             let (lexical, resolved) = parse_request_path(&path)?;
+            reject_protected(config, &resolved, "truncate")?;
             let scope = authorize(store, &lexical, &resolved, WriteOp::Overwrite)?;
             revalidate(&resolved, &lexical)?;
             let mut options = OpenOptions::new();
@@ -394,6 +402,7 @@ fn dispatch(
         }
         Operation::Delete { path } => {
             let (lexical, resolved) = parse_request_path(&path)?;
+            reject_protected(config, &resolved, "delete")?;
             let scope = authorize(store, &lexical, &resolved, WriteOp::Delete)?;
             revalidate(&resolved, &lexical)?;
             std::fs::remove_file(&resolved).map_err(io_error)?;
@@ -402,6 +411,8 @@ fn dispatch(
         Operation::Rename { path, target } => {
             let (source_lexical, source) = parse_request_path(&path)?;
             let (target_lexical, destination) = parse_request_path(&target)?;
+            reject_protected(config, &source, "rename")?;
+            reject_protected(config, &destination, "rename")?;
             let source_scope = authorize(store, &source_lexical, &source, WriteOp::Rename)?;
             authorize(store, &target_lexical, &destination, WriteOp::Create)?;
             revalidate(&source, &source_lexical)?;
@@ -416,6 +427,7 @@ fn dispatch(
         }
         Operation::Mkdir { path } => {
             let (lexical, resolved) = parse_request_path(&path)?;
+            reject_protected(config, &resolved, "mkdir")?;
             let scope = authorize(store, &lexical, &resolved, WriteOp::Mkdir)?;
             revalidate(&resolved, &lexical)?;
             std::fs::create_dir_all(&resolved).map_err(io_error)?;
@@ -427,6 +439,27 @@ fn dispatch(
             Ok(None)
         }
     }
+}
+
+/// Reject a path covered by `protected` before any approval is consulted.
+///
+/// This is the authoritative check for the broker channel: a mutable client can
+/// record its own approvals, but it can never record one for a protected path.
+fn reject_protected(config: &BrokerConfig, path: &Path, verb: &str) -> Result<(), BrokerError> {
+    if config
+        .protected
+        .iter()
+        .any(|protected| protected.matches(path))
+    {
+        return Err(BrokerError::new(
+            ErrorCode::Protected,
+            format!(
+                "{verb} of {} is blocked by sandbox protected policy",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Parse and normalize an absolute request path.
@@ -1027,6 +1060,90 @@ mod tests {
         assert!(!responses[0].ok);
         assert_eq!(responses[0].code, Some(ErrorCode::NotApproved));
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn protected_paths_cannot_be_approved_or_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        let secret = secrets.join("key");
+        std::fs::write(&secret, b"secret").unwrap();
+        let other = dir.path().join("other.txt");
+        let config = BrokerConfig {
+            protected: vec![PathRule::Dir(secrets.clone())],
+            ..BrokerConfig::default()
+        };
+
+        let responses = run_with_config(
+            &[
+                approve(
+                    1,
+                    &secret,
+                    &[WriteOp::Create, WriteOp::Overwrite],
+                    ApprovalScope::Session,
+                    false,
+                ),
+                // Even a recursive grant on the parent cannot cover it.
+                approve(
+                    2,
+                    dir.path(),
+                    &[
+                        WriteOp::Create,
+                        WriteOp::Overwrite,
+                        WriteOp::Delete,
+                        WriteOp::Mkdir,
+                    ],
+                    ApprovalScope::Session,
+                    true,
+                ),
+                write(3, &secret, b"changed", false),
+                check(4, &secret, WriteOp::Overwrite),
+                Request::new(
+                    5,
+                    Operation::Truncate {
+                        path: secret.to_string_lossy().into_owned(),
+                        len: 0,
+                    },
+                ),
+                Request::new(
+                    6,
+                    Operation::Delete {
+                        path: secret.to_string_lossy().into_owned(),
+                    },
+                ),
+                Request::new(
+                    7,
+                    Operation::Mkdir {
+                        path: secrets.join("newdir").to_string_lossy().into_owned(),
+                    },
+                ),
+                Request::new(
+                    8,
+                    Operation::Rename {
+                        path: secret.to_string_lossy().into_owned(),
+                        target: other.to_string_lossy().into_owned(),
+                    },
+                ),
+                Request::new(
+                    9,
+                    Operation::Rename {
+                        path: other.to_string_lossy().into_owned(),
+                        target: secret.to_string_lossy().into_owned(),
+                    },
+                ),
+            ],
+            config,
+        );
+
+        assert_eq!(responses[0].code, Some(ErrorCode::Protected));
+        assert!(responses[1].ok, "parent recursive approval is allowed");
+        for response in &responses[2..] {
+            assert_eq!(response.code, Some(ErrorCode::Protected));
+        }
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "secret");
+        assert!(!other.exists());
+        assert!(!secrets.join("newdir").exists());
     }
 
     #[test]

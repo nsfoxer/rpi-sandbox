@@ -238,6 +238,8 @@ pub enum ErrorCode {
     InvalidPath,
     /// Symlink resolution escaped the approved subtree.
     UnsafePath,
+    /// Path is protected by policy; approvals cannot override it.
+    Protected,
     /// Underlying I/O failure.
     Io,
     /// Frame or payload exceeds the configured limit.
@@ -259,6 +261,7 @@ impl ErrorCode {
             Self::NotApproved => "not_approved",
             Self::InvalidPath => "invalid_path",
             Self::UnsafePath => "unsafe_path",
+            Self::Protected => "protected",
             Self::Io => "io",
             Self::TooLarge => "too_large",
             Self::Unsupported => "unsupported",

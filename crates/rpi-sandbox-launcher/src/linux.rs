@@ -429,13 +429,9 @@ fn startup_action(policy: &SandboxPolicy, support: &SandboxSupport) -> Result<St
     if !policy.enabled || policy.mode == SandboxMode::Off {
         return Ok(Startup::Unconfined("disabled".to_string()));
     }
-    for (protected, writable) in policy.nested_protected() {
-        let detail = format!(
-            "protected path {} is inside writable root {}; the kernel cannot exclude a subtree",
-            protected.display(),
-            writable.display()
-        );
-        if policy.mode == SandboxMode::Required {
+    for gap in policy.protection_gaps() {
+        let detail = gap.describe();
+        if policy.mode == SandboxMode::Required && gap.blocks_kernel_enforcement() {
             return Err(format!("sandbox is required but {detail}"));
         }
         eprintln!("warning: sandbox: {detail}");
@@ -582,6 +578,7 @@ fn supervise(socket: BrokerSocket, child: libc::pid_t, policy: &SandboxPolicy, p
             audit: policy.audit_log.clone(),
             backend: Some("landlock".to_string()),
             profile: Some(profile.to_string()),
+            protected: policy.protected.clone(),
             ..BrokerConfig::default()
         };
         if let Err(error) = rpi_sandbox_core::serve(reader, stream, config) {

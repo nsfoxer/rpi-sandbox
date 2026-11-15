@@ -189,6 +189,74 @@ pub struct SandboxPolicy {
     pub audit_log: Option<PathBuf>,
 }
 
+/// A policy shape in which `protected` cannot be enforced by the kernel.
+///
+/// Landlock only grants access; it cannot subtract a subtree from a writable
+/// directory. The broker still denies these paths, but direct writes from
+/// `bash` or other tools inside the writable root can bypass the kernel layer.
+/// Surfaces are reported so the launcher can warn (or fail in `required` mode).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProtectionGap {
+    /// A protected path is strictly inside a writable directory rule.
+    ProtectedInsideWritable {
+        /// Protected path.
+        protected: PathBuf,
+        /// Writable root that covers it.
+        writable: PathBuf,
+    },
+    /// A protected path does not exist yet, so the kernel has nothing to bind.
+    MissingProtected {
+        /// Protected path.
+        path: PathBuf,
+    },
+    /// An `allowFileWrites` entry is covered by a protected rule.
+    AllowFileWriteProtected {
+        /// File that would otherwise be writable.
+        file: PathBuf,
+        /// Protected rule that covers it.
+        protected: PathBuf,
+    },
+}
+
+impl ProtectionGap {
+    /// Whether this gap means the kernel cannot enforce `protected`.
+    ///
+    /// `AllowFileWriteProtected` is excluded: the conflicting rule is dropped
+    /// from the Landlock plan, so it is enforced without a bypass.
+    pub fn blocks_kernel_enforcement(&self) -> bool {
+        matches!(
+            self,
+            Self::ProtectedInsideWritable { .. } | Self::MissingProtected { .. }
+        )
+    }
+
+    /// Human-readable explanation used by the launcher and `/sandbox`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::ProtectedInsideWritable {
+                protected,
+                writable,
+            } => format!(
+                "protected path {} is inside writable root {}; the kernel cannot exclude a \
+                 subtree, so bash and other tools can still write it directly (only broker \
+                 writes are denied)",
+                protected.display(),
+                writable.display()
+            ),
+            Self::MissingProtected { path } => format!(
+                "protected path {} does not exist; it is not protected until it exists and the \
+                 sandbox restarts",
+                path.display()
+            ),
+            Self::AllowFileWriteProtected { file, protected } => format!(
+                "allowFileWrites entry {} is covered by protected {} and will not be granted",
+                file.display(),
+                protected.display()
+            ),
+        }
+    }
+}
+
 impl SandboxPolicy {
     /// Classify an absolute or cwd-relative path.
     ///
@@ -215,32 +283,65 @@ impl SandboxPolicy {
         self.classify(path).is_writable()
     }
 
-    /// Protected rules that fall inside a writable directory rule.
+    /// Policy shapes the kernel cannot enforce. Empty when `protected` is
+    /// entirely outside writable roots and every protected path exists.
     ///
-    /// Landlock and Seatbelt only add rights; they cannot subtract a subtree
-    /// from an allowed parent. Callers must surface these pairs (warn in
-    /// `auto`, fail closed in `required`) until nested protection is enforced
-    /// by the in-process layer.
-    pub fn nested_protected(&self) -> Vec<(PathBuf, PathBuf)> {
-        let mut nested: Vec<(PathBuf, PathBuf)> = Vec::new();
+    /// Rules covered by `protected` are filtered out of the Landlock plan, so a
+    /// writable rule *under* a protected path is not reported here: removing it
+    /// is exact enforcement.
+    pub fn protection_gaps(&self) -> Vec<ProtectionGap> {
+        let mut gaps: Vec<ProtectionGap> = Vec::new();
         for protected in &self.protected {
-            if nested
+            let path = protected.path();
+            let writable_root = self
+                .writable
                 .iter()
-                .any(|(existing, _)| existing == protected.path())
-            {
-                continue;
+                .find(|writable| writable.path() != path && writable.matches(path));
+            if !path.exists() {
+                if writable_root.is_some() {
+                    gaps.push(ProtectionGap::MissingProtected {
+                        path: path.to_path_buf(),
+                    });
+                }
+            } else if let Some(writable) = writable_root {
+                gaps.push(ProtectionGap::ProtectedInsideWritable {
+                    protected: path.to_path_buf(),
+                    writable: writable.path().to_path_buf(),
+                });
             }
-            for writable in &self.writable {
-                if matches!(writable, PathRule::Dir(_)) && writable.matches(protected.path()) {
-                    nested.push((
-                        protected.path().to_path_buf(),
-                        writable.path().to_path_buf(),
-                    ));
-                    break;
+            for file in &self.allow_file_writes {
+                if protected.matches(file.path()) {
+                    gaps.push(ProtectionGap::AllowFileWriteProtected {
+                        file: file.path().to_path_buf(),
+                        protected: path.to_path_buf(),
+                    });
                 }
             }
         }
-        nested
+        let mut unique: Vec<ProtectionGap> = Vec::new();
+        for gap in gaps {
+            if !unique.contains(&gap) {
+                unique.push(gap);
+            }
+        }
+        unique
+    }
+
+    /// Protected rules that fall inside a writable directory rule.
+    ///
+    /// Kept for callers that only need the legacy pair list; prefer
+    /// [`Self::protection_gaps`] for user-facing diagnostics.
+    pub fn nested_protected(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.protection_gaps()
+            .into_iter()
+            .filter_map(|gap| match gap {
+                ProtectionGap::ProtectedInsideWritable {
+                    protected,
+                    writable,
+                } => Some((protected, writable)),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -319,6 +420,10 @@ pub fn compile_policy(
         .and_then(|settings| settings.audit_log.as_deref())
         .and_then(|value| expand_configured_path(value, context));
 
+    dedupe_rules(&mut writable);
+    dedupe_rules(&mut protected);
+    dedupe_rules(&mut allow_file_writes);
+
     SandboxPolicy {
         enabled,
         mode,
@@ -355,6 +460,19 @@ fn push_file_rules(target: &mut Vec<PathRule>, values: &[String], context: &Poli
             target.push(PathRule::File(path));
         }
     }
+}
+
+/// Drop exact duplicate rules while keeping the first occurrence (and order).
+fn dedupe_rules(rules: &mut Vec<PathRule>) {
+    let mut seen: Vec<PathRule> = Vec::new();
+    rules.retain(|rule| {
+        if seen.contains(rule) {
+            false
+        } else {
+            seen.push(rule.clone());
+            true
+        }
+    });
 }
 
 /// Load one sandbox settings file.
@@ -610,22 +728,107 @@ mod tests {
 
     #[test]
     fn nested_protection_is_reported() {
-        let policy = compile_policy(
-            Some(&settings(
-                r#"{
-                    "enabled": true,
-                    "writable": ["${cwd}"],
-                    "protected": ["${cwd}/.rpi/agent", "${home}/.ssh"]
-                }"#,
-            )),
-            None,
-            &PolicyOverrides::default(),
-            &context(),
-            &[],
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let secrets = project.join(".rpi").join("agent");
+        std::fs::create_dir_all(&secrets).unwrap();
+
+        let policy = SandboxPolicy {
+            enabled: true,
+            mode: SandboxMode::Auto,
+            writable: vec![PathRule::Dir(normalize_and_resolve(&project))],
+            protected: vec![PathRule::Dir(normalize_and_resolve(&secrets))],
+            allow_file_writes: Vec::new(),
+            approval: ApprovalSettings::default(),
+            audit_log: None,
+        };
         let nested = policy.nested_protected();
         assert_eq!(nested.len(), 1);
-        assert_eq!(nested[0].0, PathBuf::from("/work/project/.rpi/agent"));
+        assert_eq!(nested[0].0, normalize_and_resolve(&secrets));
+        assert!(matches!(
+            policy.protection_gaps().as_slice(),
+            [ProtectionGap::ProtectedInsideWritable { .. }]
+        ));
+    }
+
+    #[test]
+    fn compiled_rules_are_deduplicated() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let context = PolicyContext {
+            cwd: cwd.clone(),
+            home: Some(cwd.clone()),
+            temp: cwd.clone(),
+        };
+        let policy = compile_policy(
+            Some(&settings(r#"{"enabled": true, "writable": ["${cwd}"]}"#)),
+            None,
+            &PolicyOverrides::default(),
+            &context,
+            std::slice::from_ref(&cwd),
+        );
+        let normalized = normalize_and_resolve(&cwd);
+        assert_eq!(
+            policy
+                .writable
+                .iter()
+                .filter(|rule| rule.path() == normalized)
+                .count(),
+            1,
+            "cwd must appear exactly once"
+        );
+    }
+
+    #[test]
+    fn protection_gaps_cover_the_unenforceable_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let secrets = root.join("secrets");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::create_dir_all(nested.join("sub")).unwrap();
+
+        let mut policy = SandboxPolicy {
+            enabled: true,
+            mode: SandboxMode::Auto,
+            writable: vec![PathRule::Dir(normalize_and_resolve(root))],
+            protected: vec![PathRule::Dir(normalize_and_resolve(&secrets))],
+            allow_file_writes: Vec::new(),
+            approval: ApprovalSettings::default(),
+            audit_log: None,
+        };
+        assert!(matches!(
+            policy.protection_gaps().as_slice(),
+            [ProtectionGap::ProtectedInsideWritable { .. }]
+        ));
+
+        // A missing protected path inside writable is not bound by the kernel.
+        policy.protected = vec![PathRule::Dir(normalize_and_resolve(&root.join("missing")))];
+        assert!(matches!(
+            policy.protection_gaps().as_slice(),
+            [ProtectionGap::MissingProtected { .. }]
+        ));
+
+        // A writable rule under protected is filtered from Landlock, so it is
+        // not reported as a gap.
+        policy.writable = vec![PathRule::Dir(normalize_and_resolve(&nested.join("sub")))];
+        policy.protected = vec![PathRule::Dir(normalize_and_resolve(&nested))];
+        assert!(policy.protection_gaps().is_empty());
+
+        // An allowFileWrites entry covered by protected is reported (and
+        // filtered from the Landlock plan).
+        policy.writable = vec![PathRule::Dir(normalize_and_resolve(root))];
+        policy.protected = vec![PathRule::Dir(normalize_and_resolve(&secrets))];
+        policy.allow_file_writes =
+            vec![PathRule::File(normalize_and_resolve(&secrets.join("key")))];
+        assert!(policy
+            .protection_gaps()
+            .iter()
+            .any(|gap| matches!(gap, ProtectionGap::AllowFileWriteProtected { .. })));
+        assert!(policy.protection_gaps().iter().all(|gap| {
+            !gap.blocks_kernel_enforcement()
+                || matches!(gap, ProtectionGap::ProtectedInsideWritable { .. })
+        }));
     }
 
     #[test]

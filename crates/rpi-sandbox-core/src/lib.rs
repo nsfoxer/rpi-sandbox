@@ -36,7 +36,7 @@ pub use broker::{BrokerClient, Hello, WriteBroker};
 pub use path::{absolute_lexical, has_nul, lexical_normalize, normalize_and_resolve};
 pub use policy::{
     compile_policy, expand_configured_path, load_settings_file, Access, ApprovalSettings, PathRule,
-    PolicyContext, PolicyOverrides, SandboxMode, SandboxPolicy, SandboxSettings,
+    PolicyContext, PolicyOverrides, ProtectionGap, SandboxMode, SandboxPolicy, SandboxSettings,
 };
 pub use probe::{probe, SandboxBackend, SandboxSupport};
 #[cfg(unix)]
