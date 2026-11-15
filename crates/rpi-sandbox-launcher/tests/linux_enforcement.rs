@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rpi_sandbox_core::{ApprovalScope, BrokerClient, WriteOp};
 
 fn launcher() -> &'static str {
-    env!("CARGO_BIN_EXE_rpi-sandbox-launcher")
+    env!("CARGO_BIN_EXE_rpi-sandbox")
 }
 
 fn landlock_available() -> bool {

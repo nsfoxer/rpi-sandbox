@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "Starts rpi inside a whole-process filesystem sandbox"
 
+[[bin]]
+name = "rpi-sandbox"
+path = "src/main.rs"
+
 [dependencies]
 rpi-sandbox-core = { path = "../rpi-sandbox-core" }
 serde_json.workspace = true
