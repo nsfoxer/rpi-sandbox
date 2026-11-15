@@ -116,12 +116,12 @@ core 的 `libc` 仅在 Unix 启用。
 
 **完成标准**：`cargo test -p rpi-sandbox-core` 全绿；文档与代码一致。
 
-### Phase 1（Linux）
+### Phase 1（已完成）
 
-- [ ] launcher：参数解析、socket、fork broker、Landlock、`exec`
-- [ ] 信号/退出码/清理
-- [ ] 集成测试：允许写、读放行、越界写拒绝、bash 后代继承、broker 授权写
-- [ ] 手工验收：`rpi-sandbox --write <tmp> -- rpi -p "..."`
+- [x] launcher：参数解析、socket、fork broker、Landlock、`exec`
+- [x] 信号/退出码/清理
+- [x] 集成测试：允许写、读放行、越界写拒绝、bash 后代继承、broker 授权写
+- [x] 手工验收：`rpi-sandbox --write <tmp> -- rpi -p "..."`（本机以 `/bin/sh` 载荷验证）
 
 **完成标准**：`cargo test` 全绿；`docs/platforms/linux.md` 的验收清单全部打勾。
 

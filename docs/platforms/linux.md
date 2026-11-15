@@ -58,13 +58,14 @@ for rule in writable:
 
 ## 验收
 
-- [ ] 可写根内写入成功
-- [ ] 任意路径可读
-- [ ] 根外写入返回 `EACCES`
-- [ ] `bash` 后代同样受限
-- [ ] 授权后 broker 写入成功；撤销后拒绝
-- [ ] ABI v1/v2/v3 的掩码单测
-- [ ] `mode=required` 在无 Landlock 内核上拒绝启动
+- [x] 可写根内写入成功
+- [x] 任意路径可读
+- [x] 根外写入返回 `EACCES`
+- [x] `bash` 后代同样受限
+- [x] 授权后 broker 写入成功；撤销后拒绝
+- [x] ABI v1/v2/v3 的掩码单测
+- [x] `mode=required` 在无 Landlock 内核上拒绝启动
 
-参考实现：`feat/fs-sandbox` 分支的
-`crates/rpi-sandbox/src/linux.rs` 与 `crates/rpi-sandbox/tests/landlock_enforcement.rs`。
+实现与测试：`crates/rpi-sandbox-core/src/linux.rs`、
+`crates/rpi-sandbox-core/tests/landlock_enforcement.rs`、
+`crates/rpi-sandbox-launcher/tests/linux_enforcement.rs`。

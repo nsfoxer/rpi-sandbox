@@ -28,26 +28,29 @@
 
 ## Phase 1：Linux launcher MVP（3–5 天）
 
+状态：**已完成**。
+
 ### 任务
 
-- [ ] launcher 参数：
+- [x] launcher 参数：
   - `--profile <name>`、`--config <path>`、`--write <dir>`、`--protect <path>`
   - `--mode auto|required`、`--audit <path>`、`--no-broker`
   - `-- <rpi args...>`
-- [ ] 启动顺序：解析 → socket → fork broker → Landlock → `exec`
-- [ ] Landlock 计划按 `platforms/linux.md`：ABI 探测、`WRITE/MAKE/REMOVE/REFER/TRUNCATE`
-- [ ] broker：单线程服务、授权存储、`check`、写操作、审计
-- [ ] 退出码/信号：父进程等待并透传；崩溃清理 socket
-- [ ] 集成测试（子进程）：
+- [x] 启动顺序：解析 → socket → fork broker → Landlock → `exec`
+- [x] Landlock 计划按 `platforms/linux.md`：ABI 探测、`WRITE/MAKE/REMOVE/REFER/TRUNCATE`
+- [x] broker：单线程服务、授权存储、`check`、写操作、审计
+- [x] 退出码/信号：父进程等待并透传；崩溃清理 socket
+- [x] 集成测试（子进程）：
   - 允许路径可写；任意路径可读；越界写 `EACCES`
   - `bash` 后代继承
   - 授权后 broker 写入成功；撤销后拒绝
 
 ### 验收
 
-- `rpi-sandbox --write <tmp> -- rpi -p "写文件"` 行为符合预期；
-- 测试覆盖 `protocol.md` 中的所有写操作；
-- `mode=required` 在无 Landlock 内核上拒绝启动。
+- [x] `rpi-sandbox --write <tmp> -- <command>` 行为符合预期（测试用 `/bin/sh` 载荷替代 `rpi`，
+  因为本机未安装 rpi 宿主）；
+- [x] 测试覆盖 `protocol.md` 中的所有写操作（core broker 单元测试）；
+- [x] `mode=required` 在无 Landlock 内核上拒绝启动（单元测试）。
 
 ## Phase 2：扩展 MVP（3–5 天）
 

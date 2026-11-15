@@ -35,6 +35,6 @@
 
 ## 当前状态
 
-**Phase 0 已完成**：工作区、协议、策略、审批存储、Landlock 计划与 broker 均已迁入并通过
-离线测试；`rpi-sandbox-launcher` 与 `rpi-sandbox-extension` 目前只有骨架，分别从
-Phase 1 / Phase 2 开始实现。见 `docs/roadmap.md`。
+**Phase 0–1 已完成**：core（策略、协议、审批存储、broker、Landlock）与 Linux launcher
+已实现并通过离线测试。`rpi-sandbox-extension` 目前只有骨架，Phase 2 开始实现。
+见 `docs/roadmap.md`。
