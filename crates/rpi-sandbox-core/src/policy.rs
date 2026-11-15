@@ -357,6 +357,23 @@ fn push_file_rules(target: &mut Vec<PathRule>, values: &[String], context: &Poli
     }
 }
 
+/// Load one sandbox settings file.
+///
+/// A missing file is `Ok(None)` so defaults apply; malformed JSON is an error
+/// so a broken policy fails closed instead of silently widening access.
+pub fn load_settings_file(path: &Path) -> Result<Option<SandboxSettings>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|error| format!("invalid sandbox settings {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "cannot read sandbox settings {}: {error}",
+            path.display()
+        )),
+    }
+}
+
 /// Expand `${cwd}`, `${home}`, `${tmp}`, and a leading `~`, then resolve
 /// relative paths against the project directory.
 ///
@@ -751,6 +768,24 @@ mod tests {
         let approval = ApprovalSettings::default();
         assert!(approval.is_enabled());
         assert_eq!(approval.scope(), ApprovalScope::Session);
+    }
+
+    #[test]
+    fn settings_files_are_optional_but_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.json");
+        assert_eq!(load_settings_file(&missing).unwrap(), None);
+
+        let valid = dir.path().join("valid.json");
+        std::fs::write(&valid, r#"{"enabled": true}"#).unwrap();
+        assert_eq!(
+            load_settings_file(&valid).unwrap().unwrap().enabled,
+            Some(true)
+        );
+
+        let broken = dir.path().join("broken.json");
+        std::fs::write(&broken, "{").unwrap();
+        assert!(load_settings_file(&broken).is_err());
     }
 
     #[test]

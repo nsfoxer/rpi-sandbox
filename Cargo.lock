@@ -157,6 +157,7 @@ dependencies = [
  "rpi-sandbox-core",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

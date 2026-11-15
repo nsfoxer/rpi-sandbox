@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rpi_sandbox_core::protocol::env;
 use rpi_sandbox_core::{
-    compile_policy, linux, normalize_and_resolve, probe, BrokerConfig, PolicyContext,
-    PolicyOverrides, SandboxMode, SandboxPolicy, SandboxSettings, SandboxSupport, PROTOCOL_VERSION,
+    compile_policy, linux, load_settings_file, normalize_and_resolve, probe, BrokerConfig,
+    PolicyContext, PolicyOverrides, SandboxMode, SandboxPolicy, SandboxSupport, PROTOCOL_VERSION,
 };
 
 const HELP: &str = "\
@@ -130,11 +130,11 @@ fn launch(args: Args) -> Result<(), String> {
     }
     let cwd = std::env::current_dir()
         .map_err(|error| format!("cannot determine the working directory: {error}"))?;
-    let policy = build_policy(&args, &cwd)?;
+    let (policy, config_path) = build_policy(&args, &cwd)?;
 
     if let Some(reason) = maintenance_bypass(&args.target) {
         eprintln!("sandbox: bypassed ({reason})");
-        return exec_target(&args, false, None);
+        return exec_target(&args, false, None, config_path.as_deref());
     }
 
     match startup_action(&policy, &probe())? {
@@ -142,7 +142,7 @@ fn launch(args: Args) -> Result<(), String> {
             if policy.enabled && policy.mode != SandboxMode::Off {
                 eprintln!("sandbox: {reason}; running without isolation");
             }
-            return exec_target(&args, false, None);
+            return exec_target(&args, false, None, config_path.as_deref());
         }
         Startup::Isolate => {}
     }
@@ -189,13 +189,13 @@ fn launch(args: Args) -> Result<(), String> {
     // Agent side: apply Landlock after the fork and before exec so the broker
     // stays unconfined and the domain covers every future thread and child.
     match linux::plan(&policy).and_then(|plan| linux::apply(&plan)) {
-        Ok(()) => exec_target(&args, true, socket.as_deref()),
+        Ok(()) => exec_target(&args, true, socket.as_deref(), config_path.as_deref()),
         Err(error) => {
             if policy.mode == SandboxMode::Required {
                 return Err(format!("cannot apply the filesystem sandbox: {error}"));
             }
             eprintln!("warning: {error}; running without a sandbox");
-            exec_target(&args, false, None)
+            exec_target(&args, false, None, config_path.as_deref())
         }
     }
 }
@@ -262,28 +262,28 @@ fn parse_args<I: Iterator<Item = OsString>>(args: I) -> Result<Args, ParseError>
 }
 
 fn maintenance_bypass(target: &[String]) -> Option<&'static str> {
-    let first = target
-        .iter()
-        .skip(1)
-        .find(|argument| !argument.starts_with('-'))?;
+    // `-- <program> <subcommand> ...`: the subcommand is the first argument
+    // after the executable. Checking flags would require knowing rpi's entire
+    // option grammar; maintenance commands are always first.
+    let first = target.get(1)?;
     MAINTENANCE
         .contains(&first.as_str())
         .then_some("maintenance command")
 }
 
-fn build_policy(args: &Args, cwd: &Path) -> Result<SandboxPolicy, String> {
+fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<PathBuf>), String> {
     let default_config = agent_dir().map(|dir| dir.join("sandbox.json"));
     let config_path = args.config.clone().or(default_config);
-    let global = match config_path {
+    let global = match &config_path {
         Some(path) => {
             if args.config.is_some() && !path.exists() {
                 return Err(format!("sandbox settings {} do not exist", path.display()));
             }
-            load_settings(&path)?
+            load_settings_file(path)?
         }
         None => None,
     };
-    let project = load_settings(&cwd.join(".rpi/sandbox.json"))?;
+    let project = load_settings_file(&cwd.join(".rpi/sandbox.json"))?;
 
     let enabled = args
         .enabled
@@ -321,7 +321,7 @@ fn build_policy(args: &Args, cwd: &Path) -> Result<SandboxPolicy, String> {
     if let Some(audit) = &args.audit {
         policy.audit_log = Some(resolve_against(audit, cwd));
     }
-    Ok(policy)
+    Ok((policy, config_path))
 }
 
 /// Map the policy and probe result to a startup action.
@@ -351,19 +351,6 @@ fn startup_action(policy: &SandboxPolicy, support: &SandboxSupport) -> Result<St
                 Ok(Startup::Unconfined(reason.clone()))
             }
         }
-    }
-}
-
-fn load_settings(path: &Path) -> Result<Option<SandboxSettings>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| format!("invalid sandbox settings {}: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!(
-            "cannot read sandbox settings {}: {error}",
-            path.display()
-        )),
     }
 }
 
@@ -543,10 +530,23 @@ fn exit_code(status: i32) -> i32 {
 ///
 /// When `applied` is false every sandbox variable is removed so the extension
 /// cannot mistake an unconfined process for an isolated one.
-fn exec_target(args: &Args, applied: bool, socket: Option<&Path>) -> Result<(), String> {
+fn exec_target(
+    args: &Args,
+    applied: bool,
+    socket: Option<&Path>,
+    config: Option<&Path>,
+) -> Result<(), String> {
     let mut command = Command::new(&args.target[0]);
     command.args(&args.target[1..]);
-    for name in [env::ACTIVE, env::SOCKET, env::PROFILE, env::VERSION] {
+    for name in [
+        env::ACTIVE,
+        env::SOCKET,
+        env::PROFILE,
+        env::VERSION,
+        env::CONFIG,
+        env::WRITABLE,
+        env::PROTECTED,
+    ] {
         command.env_remove(name);
     }
     if applied {
@@ -557,6 +557,15 @@ fn exec_target(args: &Args, applied: bool, socket: Option<&Path>) -> Result<(), 
         if let Some(socket) = socket {
             command.env(env::SOCKET, socket);
         }
+        if !args.writable.is_empty() {
+            command.env(env::WRITABLE, args.writable.join("\n"));
+        }
+        if !args.protected.is_empty() {
+            command.env(env::PROTECTED, args.protected.join("\n"));
+        }
+    }
+    if let Some(config) = config {
+        command.env(env::CONFIG, config);
     }
     let error = command.exec();
     Err(format!("cannot exec {}: {error}", args.target[0]))

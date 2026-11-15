@@ -238,6 +238,32 @@ fn explicit_bypass_does_not_claim_isolation() {
 }
 
 #[test]
+fn cli_paths_are_exported_to_the_extension() {
+    if !landlock_available() {
+        eprintln!("landlock unavailable; skipping");
+        return;
+    }
+    let allowed = tempfile::tempdir().unwrap();
+    let writable_file = allowed.path().join("writable");
+    let protected_file = allowed.path().join("protected");
+    let script = format!(
+        "printf '%s' \"$RPI_SANDBOX_WRITABLE\" > '{}'; printf '%s' \"$RPI_SANDBOX_PROTECTED\" > '{}'",
+        writable_file.display(),
+        protected_file.display()
+    );
+    let output = run_shell(
+        &["--write", "/srv/data", "--protect", "/srv/secrets"],
+        &script,
+    );
+    assert!(output.status.success());
+    assert_eq!(std::fs::read_to_string(writable_file).unwrap(), "/srv/data");
+    assert_eq!(
+        std::fs::read_to_string(protected_file).unwrap(),
+        "/srv/secrets"
+    );
+}
+
+#[test]
 fn exit_codes_are_propagated() {
     let output = run_shell(&[], "exit 7");
     assert_eq!(output.status.code(), Some(7));

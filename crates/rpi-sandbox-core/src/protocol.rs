@@ -27,6 +27,13 @@ pub mod env {
     pub const PROFILE: &str = "RPI_SANDBOX_PROFILE";
     /// Protocol version expected by the broker.
     pub const VERSION: &str = "RPI_SANDBOX_VERSION";
+    /// Global settings file the launcher used, so the extension compiles the
+    /// same policy.
+    pub const CONFIG: &str = "RPI_SANDBOX_CONFIG";
+    /// Newline-separated `--write` paths from the launcher.
+    pub const WRITABLE: &str = "RPI_SANDBOX_WRITABLE";
+    /// Newline-separated `--protect` paths from the launcher.
+    pub const PROTECTED: &str = "RPI_SANDBOX_PROTECTED";
 }
 
 /// One request frame.
@@ -514,6 +521,9 @@ mod tests {
         assert_eq!(env::SOCKET, "RPI_SANDBOX_SOCKET");
         assert_eq!(env::PROFILE, "RPI_SANDBOX_PROFILE");
         assert_eq!(env::VERSION, "RPI_SANDBOX_VERSION");
+        assert_eq!(env::CONFIG, "RPI_SANDBOX_CONFIG");
+        assert_eq!(env::WRITABLE, "RPI_SANDBOX_WRITABLE");
+        assert_eq!(env::PROTECTED, "RPI_SANDBOX_PROTECTED");
         assert_eq!(PROTOCOL_VERSION, 1);
     }
 }
