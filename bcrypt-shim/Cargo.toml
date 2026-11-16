@@ -1,0 +1,14 @@
+[package]
+name = "rpi-sandbox-bcrypt-shim"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Minimal bcrypt.dll replacement so rpi can start under a Windows restricted token"
+
+[lib]
+name = "bcrypt"
+crate-type = ["cdylib"]
+
+# Standalone on purpose: this is not part of the rpi-sandbox workspace and must
+# be built next to the target binary, never installed system-wide.
+[workspace]
