@@ -413,10 +413,8 @@ fn run_command(args_json: &str) -> String {
 mod tests {
     use super::*;
     use crate::gate::Approver;
-    use std::io::BufReader;
-    use std::os::unix::net::UnixListener;
 
-    use rpi_sandbox_core::{serve, BrokerConfig, PathRule, SandboxMode, SandboxPolicy};
+    use rpi_sandbox_core::{PathRule, SandboxMode, SandboxPolicy};
 
     struct Allow;
 
@@ -484,16 +482,19 @@ mod tests {
 
     #[test]
     fn out_of_policy_write_reaches_the_real_broker() {
+        use rpi_sandbox_core::{serve, BrokerConfig, Listener};
+        use std::io::BufReader;
+
         let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("broker.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let listener = Listener::bind().unwrap();
+        let endpoint = listener.name().to_path_buf();
         let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let reader = BufReader::new(stream.try_clone().unwrap());
-            serve(reader, stream, BrokerConfig::default()).unwrap();
+            let conn = listener.accept().unwrap();
+            let reader = BufReader::new(conn.try_clone().unwrap());
+            serve(reader, conn, BrokerConfig::default()).unwrap();
         });
 
-        let client = BrokerClient::connect(&socket).unwrap();
+        let client = BrokerClient::connect(&endpoint).unwrap();
         let broker = ClientBroker(&client);
         let target = dir.path().join("approved.txt");
         let outcome = gate::handle_write(
