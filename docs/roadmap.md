@@ -79,6 +79,18 @@
 - [x] headless 默认拒绝并给出可操作错误（`UiDialog` 不可用时拒绝）；
 - [x] 扩展不依赖 host 私有模块，仅 `rpi-plugin-sdk` + `rpi-sandbox-core`。
 
+## Phase 4.5：后端抽象层（Windows 阶段的顺带重构）
+
+状态：**已完成**。
+
+- [x] `core::backend`：`BackendCapabilities` / `BackendPlan` / `LaunchSpec` / `SandboxBackend`
+- [x] `core::transport`：Unix socket / Windows 命名管道统一为 `Listener` + `Conn`
+- [x] `BrokerService`：状态与连接分离，支持重连；`serve()` 保持兼容
+- [x] `core::state` / `core::audit` / `windows_plan`（可在任意宿主上单测）
+- [x] launcher 拆分为 `args` / `setup` / `linux` / `windows`，共享层只写一份
+- [x] 策略快照（`RPI_SANDBOX_POLICY`）：扩展优先读取，隔离时与内核策略一致
+- [x] 跨平台测试探针 `rpi-sandbox-probe`：Linux / Windows 用同一套断言
+
 ## Phase 3：macOS 后端（2–3 天）
 
 ### 任务
@@ -94,20 +106,25 @@
 - macOS 上 `rpis` 正常工作；
 - 越权写被拒，授权经 broker 成功。
 
-## Phase 4：Windows 后端（3–5 天）
+## Phase 4：Windows 后端（已完成）
+
+状态：**已完成**（2026-11，Windows 11 实测）。
 
 ### 任务
 
-- [ ] restricted token + 合成 SID + ACL 事务（`WRITE_RESTRICTED`）
-- [ ] 以受限 token 启动 rpi；broker 用正常 token + 命名管道
-- [ ] 崩溃清理：标记文件 + 下次启动回收 ACE
-- [ ] `bcrypt.dll` / rustls 兼容：切换 crypto provider 或提供 shim（文档化限制）
-- [ ] 集成测试：允许/拒绝/子进程/授权
+- [x] restricted token + 合成 SID + ACL 事务（`WRITE_RESTRICTED`）
+- [x] 以受限 token 启动 rpi；broker 用正常 token + 命名管道
+- [x] 崩溃清理：journal + 下次启动回收 + `--cleanup`
+- [x] `bcrypt.dll` / rustls 兼容：提供 `bcrypt-shim/` + 退出码提示（根因修复写进文档）
+- [x] 集成测试：允许/拒绝/子进程/授权/ACL 清理/journal 回收/退出码/`--print-plan`
+- [x] 卷 ACL 能力检查（exFAT/FAT32/网络共享）
+- [x] 沙箱内禁止改写自身 DACL（防止自我提权）
 
 ### 验收
 
-- 同一套测试在 Windows 通过；
-- 无残留 ACL；未授权写失败且错误可读。
+- [x] 11 个 Windows 集成测试通过；
+- [x] 无残留 ACL；未授权写失败且错误可读（`Access is denied (os error 5)`）；
+- [x] `rpi.exe` 在受限 token 下真实启动、加载插件、完成模型请求。
 
 ## Phase 5：加固与扩展（持续）
 

@@ -15,9 +15,16 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `RPI_SANDBOX_SOCKET` | broker 的 socket 路径 / 命名管道名 |
 | `RPI_SANDBOX_PROFILE` | 当前 profile 名称（用于日志与展示） |
 | `RPI_SANDBOX_VERSION=1` | 协议版本 |
-| `RPI_SANDBOX_CONFIG` | launcher 使用的全局配置文件（扩展据此编译同一策略） |
+| `RPI_SANDBOX_CONFIG` | launcher 使用的全局配置文件 |
+| `RPI_SANDBOX_POLICY` | launcher 编译后的策略快照（JSON 文件）。扩展优先读取它，避免与内核边界漂移 |
 | `RPI_SANDBOX_WRITABLE` | 换行分隔的 `--write` 路径（仅隔离时设置） |
 | `RPI_SANDBOX_PROTECTED` | 换行分隔的 `--protect` 路径（仅隔离时设置） |
+
+命名管道的 DACL 只授当前用户与本次运行的两个 capability SID：
+
+```text
+D:P(A;;GA;;;<current user>)(A;;GA;;;<read SID>)(A;;GA;;;<write SID>)
+```
 
 扩展启动时：
 
@@ -124,6 +131,7 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `invalid_path` | 非绝对路径 / 无法解析 |
 | `unsafe_path` | 软链或规范化后逃逸 |
 | `protected` | 路径被策略标记为 protected，任何授权都不能覆盖 |
+| `permission_denied` | 后端本身拒绝了写（`EACCES` / `Access is denied`） |
 | `io` | 底层 IO 错误 |
 | `too_large` | 负载超限 |
 | `unsupported` | 未知操作 |
@@ -157,6 +165,9 @@ broker 每处理一个请求追加一行 JSON：
 
 ## 7. 并发与超时
 
-- 建议 broker 单线程顺序处理；扩展侧一个请求一个响应。
+- broker 单线程顺序处理；扩展侧一个请求一个响应。
+- Unix 上客户端读写超时默认 10s；**Windows 同步命名管道没有 per-call 超时**，
+  客户端 `set_read_timeout` 是 no-op，broker 停止响应时扩展会阻塞到连接断开。
+- `BrokerService` 持有会话级授权状态，连接断开后重新 `accept` 不会丢失已有授权。
 - 请求超时（默认 10 秒）返回 `io`/`timeout`；授权对话框本身的超时由扩展负责（建议 5 分钟，超时视为拒绝）。
 - 连接断开：launcher/broker 退出，rpi 的越权写请求失败并明确报错。

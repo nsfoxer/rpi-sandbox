@@ -38,6 +38,10 @@ protected  >  writable  >  默认只读
 | 命令行参数 | 本次运行 | 与全局同权；用户显式意图 |
 | 环境变量 `RPI_SANDBOX=0` | 本次运行关闭 | 用户显式意图 |
 
+路径展开使用 `${cwd}` / `${home}` / `${tmp}` 与 `~`。`${home}` 在 Windows 上取
+`USERPROFILE`（`HOME` 在 MSYS2 下可能是 `/c/Users/...`，不是合法 Windows 路径），
+`${tmp}` 优先取 `TEMP`/`TMP`。
+
 推荐的全局配置：
 
 ```jsonc
@@ -56,6 +60,10 @@ protected  >  writable  >  默认只读
   "auditLog": "${home}/.rpi/audit/sandbox.jsonl"
 }
 ```
+
+推荐把「下次启动会被加载的东西」也放进 `protected`，例如 `${cwd}/.git/hooks`
+（阻止 prompt 注入写 git hook）与 `${cwd}/.env`。注意：把整个 `${cwd}/.git` 设为
+protected 会让沙箱内的 `git commit` 失败，因为 git 需要写 `index` 与 `refs`。
 
 项目配置示例（只能收紧）：
 

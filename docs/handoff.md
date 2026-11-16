@@ -138,9 +138,19 @@ core 的 `libc` 仅在 Unix 启用。
 **完成标准**：交互式可授权写入（待人工）；`-p` 默认拒绝；扩展只用公开 SDK。完成标准中的
 交互项需要在安装了 rpi 且配置了可用 provider 的机器上人工确认。
 
-### Phase 3 / 4
+### Phase 4（Windows，已完成）
 
-按 `roadmap.md` 与 `platforms/*.md` 执行。每个后端都必须复用同一套集成测试断言。
+- [x] restricted token + 合成 SID + ACL journal + 命名管道 broker
+- [x] `bcrypt-shim/`（独立 crate，产出 `bcrypt.dll`）+ `0xC0000142` 可操作提示
+- [x] 卷 ACL 检查、设备路径拒绝、DACL 自我改写阻断
+- [x] 11 个集成测试（允许/拒绝/子进程/授权/清理/回收/退出码/print-plan）
+
+**完成标准**：`cargo test --workspace` 在 Windows 全绿；`rpi.exe` 在受限 token 下真实启动。
+
+### Phase 3（macOS）
+
+按 `roadmap.md` 与 `platforms/macos.md` 执行。实现 `core::backend::SandboxBackend` 的
+第三个 impl（`BackendPlan::Seatbelt` + `sandbox_init` + `execve`）即可，共享层不需要改。
 
 ## 4. 关键实现提示
 
@@ -222,11 +232,14 @@ env -u SSH_ASKPASS cargo test ...
 ## 7. 已知坑
 
 1. **Landlock 按线程生效**：必须在创建 Tokio runtime / 插件加载之前应用。
+1b. **Windows 不能给自己降权**：只能在 `CreateProcessAsUserW` 时施加受限 token；父进程必须
+   保持不受限，才能当 broker 并在子进程退出后撤销 ACL。
 2. **Landlock 规则绑定 inode**：启动后删除重建的可写目录会失效，重启恢复。
 3. **软链根**：Fedora 上 `/srv -> /var/srv`、`/home -> /var/home`；路径解析要“最深的已存在
    祖先 + 剩余组件”。
 4. **嵌套 `protected`**：内核不能从可写父目录中扣除子树；启动警告或 `required` 拒绝。
-5. **Windows ACL**：修改是持久的；用事务 + 崩溃清理，避免残留。
+5. **Windows ACL**：修改是持久的；先写 journal 再加 ACE，只撤销自己新增的；
+   ACE 掩码必须用具体权限位（`GENERIC_*` 会被对象管理器改写，导致幂等检查和撤销都匹配不到）。
 6. **Windows `bcrypt.dll`**：restricted token 下 `DllMain` 失败；准备 crypto provider 切换
    或 shim，并写进文档。
 7. **macOS Seatbelt**：API deprecated；保留 `sandbox-exec` 回退方案，路径先 `realpath`。

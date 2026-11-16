@@ -19,9 +19,14 @@
 
 | 组件 | 形态 | 职责 |
 |---|---|---|
-| `rpi-sandbox-core` | 普通库 | 策略模型、路径规则、平台后端（Landlock/Seatbelt/restricted token）、broker、审计 |
-| `rpi-sandbox-launcher` | 二进制 `rpis` | 自动定位并启动 `rpi`：读策略 → 建 socket → fork broker → 应用隔离 → `exec` |
+| `rpi-sandbox-core` | 普通库 | 策略模型、后端抽象（能力/计划/启动）、传输（socket/命名管道）、broker、审计、状态目录 |
+| `rpi-sandbox-launcher` | 二进制 `rpis` | 自动定位并启动 `rpi`：读策略 → 编译计划 → 建 broker → 施加隔离 → 启动/`exec` |
 | `rpi-sandbox-extension` | `cdylib` 扩展 | `ToolCall` veto、`UiDialog` 授权、配置、授权持久化、`/sandbox`、页脚状态 |
+| `bcrypt-shim/` | 独立 `cdylib` | Windows 专用：放在 `rpi.exe` 旁边的 `bcrypt.dll`，让 rpi 能在受限 token 下启动 |
+
+平台差异被收在两个缝里：`core::backend`（策略 → 计划 → 启动）与 `core::transport`
+（Unix socket / Windows 命名管道）。CLI、策略编译、目标解析、扩展注入、环境构造、
+broker、审计全部共用一份代码。
 
 ## 快速开始
 
@@ -32,7 +37,7 @@ cargo build --workspace
 
 `rpis` 是一个可直接替代 `rpi` 的入口，不需要再手写 `-- rpi`：
 
-- 按 `--rpi <path>` → `RPI_SANDBOX_RPI` → 同目录 `rpi` → `PATH` 的顺序定位 rpi；
+- 按 `--rpi <path>` → `RPI_SANDBOX_RPI` → 同目录 `rpi`/`rpi.exe` → `PATH` 的顺序定位 rpi；
 - 如果同目录存在 `librpi_sandbox_extension.so`（或对应平台的动态库），自动以
   `--extension <file>` 注入，无需手动安装；
 - 其余参数原样传给 rpi；如果某个参数与 `rpis` 自己的选项同名，用 `--` 强制透传。
@@ -44,10 +49,27 @@ rpis --write /srv/data --resume        # 额外可写目录 + 恢复会话
 rpis --rpi /opt/rpi/bin/rpi            # 指定 rpi 二进制
 rpis -- --help                         # 查看 rpi 自己的帮助
 rpis --no-extension                    # 不自动加载沙箱扩展
+rpis --print-plan                      # 打印后端计划（不改动磁盘）
 ```
 
 长期使用时，把 `rpis` 和对应动态库放在同一目录，或把扩展安装到
 `~/.rpi/agent/extensions/`。运行后页脚会显示 `🔒 sandbox (<profile>)`。
+
+### Windows
+
+```cmd
+:: 推荐布局：rpis.exe + rpi.exe + bcrypt.dll + rpi_sandbox_extension.dll 同目录
+cd sandbox\work
+set RPI_CODING_AGENT_DIR=C:\sandbox\agent
+C:\sandbox\bin\rpis.exe -p "总结这个仓库"
+```
+
+`bcrypt.dll` 由 `bcrypt-shim/` 构建（`cd bcrypt-shim && cargo build --release`）。
+原因与替代方案见 [docs/platforms/windows.md](docs/platforms/windows.md)。
+
+Windows 额外命令：`--print-sid`（打印合成 SID）、`--cleanup`（撤销残留 ACL）、
+`--read <dir>`（读根，Windows 专用）。
+
 
 ## 模型能看到什么
 
@@ -75,6 +97,17 @@ rpis --no-extension                    # 不自动加载沙箱扩展
 
 ## 当前状态
 
-**Phase 0–2 已实现**：core、Linux launcher、扩展（策略 / veto / UiDialog / broker 写入 /
-命令 / 状态 / 模型提示）均已完成并通过离线测试。扩展已在 rpi 0.24.0 / 0.24.1 中实际加载
-验证；交互式授权流程仍需人工验收。macOS / Windows 后端见 Phase 3–4。
+**Phase 0–2 + Phase 4（Windows）已实现**：
+
+- core：策略、后端抽象、传输层、broker、审计、状态目录；Linux Landlock + Windows ACL
+  两套计划器都有离线单测；
+- Linux launcher：Landlock + fork broker + `exec`；8 个集成测试全绿（WSL/Debian 实测）；
+- Windows launcher：restricted token + 合成 SID + ACL journal + 命名管道 broker；
+  11 个集成测试全绿（Windows 11 实测）；
+- 扩展：策略 / veto / UiDialog / broker 写入 / 命令 / 状态 / 模型提示；策略快照优先，
+  隔离时与内核策略不可能漂移；已在 rpi 0.23.0（Windows）与 0.24.x 实际加载验证；
+- `rpi.exe` 在受限 token 下真实启动、加载 10 个插件、完成真实模型请求（经
+  `rpi-opencode-extras` 注入 session 头），模型能复述 `## Sandbox (rpi-sandbox)` 的内容。
+
+交互式授权（TUI 弹窗）仍需人工验收；macOS 后端见 Phase 3。
+

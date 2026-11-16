@@ -50,12 +50,28 @@
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+### 后端抽象（`core::backend`）
+
+平台差异被收敛到三个类型里，其余代码共用：
+
+| 类型 | 作用 |
+|---|---|
+| `BackendCapabilities` | 该后端能强制什么（能否扣除 protected、是否有持久副作用、是否需要读根…） |
+| `BackendPlan` | 后端计划（Landlock 规则 / ACL 条目 / 无），可用 `--print-plan` 打印、可跨平台单测 |
+| `SandboxBackend` | `plan(policy)` + `launch(plan, spec)`；`launch` **允许不返回**（Unix 内部 `exec`） |
+
+`LaunchSpec` 里已包含 CLI 解析结果、编译后的策略、环境变量增删、扩展注入后的参数、broker
+配置与读根，所以后端实现里不再出现任何 CLI/策略/协议代码。
+
 ### 启动顺序（关键）
 
 1. launcher 在**单线程**状态下完成参数与策略解析。
-2. 建立 socket；fork broker。 broker 不加载任何插件、不解析模型输出。
-3. launcher 对自身应用隔离后端（Landlock / Seatbelt / restricted token）。
-4. `exec rpi`。此后创建的所有线程和子进程都继承该边界。
+2. 建立 broker 端点（Unix socket / Windows 命名管道）；broker 不加载插件、不解析模型输出。
+3. 应用隔离：
+   - Linux / macOS：对**自身**应用域（Landlock / Seatbelt），随后 `exec rpi`；
+   - Windows：不能给自己降权，改为构造 restricted token 并 `CreateProcessAsUserW`，
+     父进程保持不受限、等待子进程并撤销 ACL。
+4. 此后创建的所有线程和子进程都继承该边界。
 5. rpi 加载扩展。扩展发现自己处于沙箱内（环境变量），开始执行策略与 UI。
 
 ## 3. 信任模型
@@ -108,7 +124,7 @@
 
 | 场景 | 行为 |
 |---|---|
-| 经 launcher 启动 | 整进程内核边界；扩展负责策略与授权 |
+| 经 launcher 启动 | 整进程边界（Landlock 域 / restricted token + ACL）；扩展负责策略与授权 |
 | 未经 launcher 启动 | 扩展提示“当前未隔离”；可选降级为工具级 gating（advisory） |
 | launcher 不支持当前平台 | 按配置：警告并继续，或拒绝启动（`required`） |
 | 用户关闭沙箱 | launcher 直接 `exec rpi`；扩展可提示沙箱未启用 |

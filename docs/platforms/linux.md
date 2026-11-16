@@ -40,10 +40,12 @@ for rule in writable:
 
 ## 应用顺序
 
-1. launcher 单线程解析参数/策略；
-2. 建 socket、fork broker；
-3. 子进程（即将 exec 的 launcher 本体）调用 `apply`；
+1. launcher 单线程解析参数/策略（`args.rs` / `setup.rs`，与 Windows 共用）；
+2. `Listener::bind` 建 Unix socket、fork broker（父进程在独立线程上服务审批）；
+3. 子进程（即将 exec 的 launcher 本体）调用 `linux::apply`；
 4. `exec rpi`。
+
+后端实现：`crates/rpi-sandbox-launcher/src/linux.rs`（`SandboxBackend` 的 Landlock impl）。
 
 错误处理：`landlock_create_ruleset` / `add_rule` / `restrict_self` 任一步失败都必须
 按 `mode` 决定继续（警告）或拒绝启动。
