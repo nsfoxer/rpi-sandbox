@@ -12,7 +12,7 @@
 //! - [`broker`] owns approvals, performs authorized writes, and appends audit
 //!   records. It runs outside the sandbox.
 //! - [`probe`] reports what the current platform can enforce; [`linux`] holds
-//!   the Landlock planner and [`windows_plan`] the ACL planner.
+//!   the Landlock planner and [`mxc_plan`] the MXC planner.
 //!
 //! This crate deliberately has no dependency on any `rpi-*` crate: it is the
 //! platform and policy layer, not part of the host.
@@ -34,7 +34,7 @@ pub mod transport;
 pub mod linux;
 
 #[cfg(windows)]
-pub mod windows_plan;
+pub mod mxc_plan;
 
 pub use approval::{
     ApprovalDecision, ApprovalError, ApprovalOption, ApprovalRequest, ApprovalScope, WriteOp,
@@ -60,8 +60,5 @@ pub use protocol::{
     read_frame, ErrorCode, Frame, Operation, Request, Response, DEFAULT_MAX_PAYLOAD,
     OPERATION_NAMES, PROTOCOL_VERSION,
 };
-pub use state::{
-    acl_journal_dir, ensure_state_dir, nonce, policy_snapshot_path, state_dir,
-    sweep_policy_snapshots,
-};
+pub use state::{ensure_state_dir, nonce, policy_snapshot_path, state_dir, sweep_policy_snapshots};
 pub use transport::{Conn, Listener};

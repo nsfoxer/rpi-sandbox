@@ -11,7 +11,7 @@ mod setup;
 mod linux;
 
 #[cfg(windows)]
-mod windows;
+mod mxc;
 
 #[cfg(any(target_os = "linux", windows))]
 fn main() {

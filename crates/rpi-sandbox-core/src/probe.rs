@@ -14,8 +14,8 @@ pub enum SandboxBackend {
     },
     /// macOS Seatbelt (`sandbox_init`).
     Seatbelt,
-    /// Windows restricted token with a synthetic SID.
-    WindowsRestrictedToken,
+    /// Microsoft Execution Containers (`processcontainer`).
+    WindowsMxc,
     /// No confinement mechanism (explicit `--no-sandbox`).
     None,
 }
@@ -26,7 +26,7 @@ impl SandboxBackend {
         match self {
             Self::Landlock { .. } => "landlock",
             Self::Seatbelt => "seatbelt",
-            Self::WindowsRestrictedToken => "windows-restricted-token",
+            Self::WindowsMxc => "windows-mxc",
             Self::None => "none",
         }
     }
@@ -141,81 +141,22 @@ pub(crate) fn landlock_abi() -> Result<u32, String> {
     })
 }
 
-/// Probe by building and discarding one restricted token.
+/// Probe Microsoft Execution Containers.
 ///
-/// `CreateRestrictedToken` is the only Windows API the backend cannot do
-/// without; if it succeeds for the current user, ACL-based enforcement is
-/// available. This touches no filesystem state.
+/// This asks the MXC SDK which native backends the host can run. It touches no
+/// filesystem state and creates no container.
 #[cfg(target_os = "windows")]
 fn probe_windows() -> SandboxSupport {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::Security::{
-        CreateRestrictedToken, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_QUERY,
-    };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    // Documented flag values (windows-sys does not define them).
-    const DISABLE_MAX_PRIVILEGE: u32 = 0x01;
-    const LUA_TOKEN: u32 = 0x04;
-    const WRITE_RESTRICTED: u32 = 0x08;
-
-    let mut base: HANDLE = std::ptr::null_mut();
-    // SAFETY: the pseudo-handle is valid and the returned token is closed.
-    let ok = unsafe {
-        OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_DUPLICATE | TOKEN_QUERY,
-            &mut base,
-        )
-    };
-    if ok == 0 {
-        return SandboxSupport::Unsupported {
-            reason: format!(
-                "cannot open the process token: {}",
-                std::io::Error::last_os_error()
-            ),
-        };
-    }
-
-    // `Everyone` (S-1-1-0) is only used to make the probe token realistically
-    // restricted; it is never added to any ACL.
-    let mut everyone: [u8; 12] = [0x01, 0x01, 0, 0, 0, 0, 0, 5, 0x01, 0, 0, 0];
-    let entries = [SID_AND_ATTRIBUTES {
-        Sid: everyone.as_mut_ptr() as windows_sys::Win32::Security::PSID,
-        Attributes: 0,
-    }];
-    let mut restricted: HANDLE = std::ptr::null_mut();
-    // SAFETY: `base` is a valid token, `entries` points at one valid SID, and
-    // the new handle is closed below.
-    let ok = unsafe {
-        CreateRestrictedToken(
-            base,
-            DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED,
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            entries.len() as u32,
-            entries.as_ptr(),
-            &mut restricted,
-        )
-    };
-    // SAFETY: both handles are owned by this function.
-    unsafe {
-        CloseHandle(base);
-        if !restricted.is_null() {
-            CloseHandle(restricted);
+    let support = mxc_sdk::v1::platform_support();
+    if support.is_supported {
+        SandboxSupport::Supported(SandboxBackend::WindowsMxc)
+    } else {
+        SandboxSupport::Unsupported {
+            reason: support.reason.unwrap_or_else(|| {
+                "MXC is not available on this Windows build (needs Windows 11 24H2 build 26100+ with the MXC update)".to_string()
+            }),
         }
     }
-    if ok == 0 {
-        return SandboxSupport::Unsupported {
-            reason: format!(
-                "cannot create a restricted token: {}",
-                std::io::Error::last_os_error()
-            ),
-        };
-    }
-    SandboxSupport::Supported(SandboxBackend::WindowsRestrictedToken)
 }
 
 #[cfg(test)]
@@ -238,19 +179,18 @@ mod tests {
     fn backend_names_are_stable() {
         assert_eq!(SandboxBackend::Landlock { abi: 6 }.name(), "landlock");
         assert_eq!(SandboxBackend::Seatbelt.name(), "seatbelt");
-        assert_eq!(
-            SandboxBackend::WindowsRestrictedToken.name(),
-            "windows-restricted-token"
-        );
+        assert_eq!(SandboxBackend::WindowsMxc.name(), "windows-mxc");
         assert_eq!(SandboxBackend::None.name(), "none");
     }
 
     #[cfg(windows)]
     #[test]
-    fn windows_reports_the_restricted_token_backend() {
-        assert_eq!(
-            probe(),
-            SandboxSupport::Supported(SandboxBackend::WindowsRestrictedToken)
-        );
+    fn windows_probe_names_mxc_or_explains_why_not() {
+        match probe() {
+            SandboxSupport::Supported(backend) => {
+                assert_eq!(backend, SandboxBackend::WindowsMxc)
+            }
+            SandboxSupport::Unsupported { reason } => assert!(!reason.is_empty()),
+        }
     }
 }

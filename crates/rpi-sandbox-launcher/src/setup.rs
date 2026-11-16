@@ -3,7 +3,7 @@
 //! Everything here is platform-neutral: argument handling, policy compilation,
 //! target resolution, extension injection, environment construction, the
 //! policy snapshot, and the startup decision. The platform modules
-//! (`linux.rs`, `windows.rs`) only compile a plan and launch the target.
+//! (`linux.rs`, `mxc.rs`) only compile a plan and launch the target.
 
 use std::path::{Path, PathBuf};
 
@@ -44,10 +44,6 @@ pub fn run(args: Args) -> Result<i32, String> {
     } else {
         Vec::new()
     };
-    if run_platform_actions(&args, &policy, &cwd, &rpi, &read_roots)? {
-        return Ok(0);
-    }
-
     let bypass = maintenance_bypass(&args.target);
     let startup = if bypass.is_some() {
         Startup::Unconfined("maintenance command".to_string())
@@ -130,40 +126,7 @@ pub fn platform_backend() -> &'static dyn SandboxBackend {
 /// The backend compiled for this target.
 #[cfg(windows)]
 pub fn platform_backend() -> &'static dyn SandboxBackend {
-    &crate::windows::BACKEND
-}
-
-/// Run `--cleanup` / `--print-sid`, returning `true` when the run is finished.
-fn run_platform_actions(
-    args: &Args,
-    policy: &SandboxPolicy,
-    cwd: &Path,
-    _rpi: &Path,
-    read_roots: &[PathBuf],
-) -> Result<bool, String> {
-    #[cfg(windows)]
-    {
-        if args.cleanup {
-            return crate::windows::cleanup(&args.profile, cwd, policy, read_roots).map(|()| true);
-        }
-        if args.print_sid {
-            crate::windows::print_sids(&args.profile, cwd);
-            return Ok(true);
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (policy, cwd, read_roots);
-        if args.cleanup {
-            eprintln!("rpis: --cleanup only applies to the Windows backend");
-            return Ok(true);
-        }
-        if args.print_sid {
-            eprintln!("rpis: --print-sid only applies to the Windows backend");
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    &crate::mxc::BACKEND
 }
 
 /// Map the policy, backend capabilities, and probe result to a startup action.
@@ -176,8 +139,12 @@ pub fn startup_action(
         return Ok(Startup::Unconfined("disabled".to_string()));
     }
     for gap in policy.protection_gaps() {
+        if !gap.blocks_enforcement(capabilities) {
+            // The backend can subtract the subtree (MXC `denied_paths`, Seatbelt).
+            continue;
+        }
         let detail = gap.describe();
-        if policy.mode == SandboxMode::Required && gap.blocks_enforcement(capabilities) {
+        if policy.mode == SandboxMode::Required {
             return Err(format!("sandbox is required but {detail}"));
         }
         eprintln!("warning: sandbox: {detail}");
@@ -242,12 +209,12 @@ fn collect_read_roots(rpi: &Path, args: &Args, cwd: &Path) -> Vec<PathBuf> {
     };
     if let Some(dir) = rpi.parent() {
         if !dir.as_os_str().is_empty() {
-            push(normalize_and_resolve(dir));
+            push(resolve_against(dir, cwd));
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            push(normalize_and_resolve(dir));
+            push(resolve_against(dir, cwd));
         }
     }
     if let Some(dir) = agent_dir() {
@@ -519,7 +486,7 @@ mod tests {
         restricted.protected = vec![PathRule::Dir(secret)];
         let mut capabilities = caps();
         capabilities.can_subtract_protected = true;
-        let support = SandboxSupport::Supported(BackendKind::WindowsRestrictedToken);
+        let support = SandboxSupport::Supported(BackendKind::WindowsMxc);
         assert_eq!(
             startup_action(&restricted, capabilities, &support).unwrap(),
             Startup::Isolate

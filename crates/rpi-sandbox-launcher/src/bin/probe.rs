@@ -7,7 +7,6 @@
 //! rpi-sandbox-probe write  <path> <content>   write a file directly
 //! rpi-sandbox-probe read   <path>             print a file
 //! rpi-sandbox-probe spawn-write <path> <text> write from a grandchild
-//! rpi-sandbox-probe set-acl <path>            try to widen a DACL (Windows)
 //! rpi-sandbox-probe broker-hello              handshake with the broker
 //! rpi-sandbox-probe broker-write <path> <t>   approve + write through the broker
 //! rpi-sandbox-probe env <name>                print an environment variable
@@ -28,7 +27,6 @@ fn main() {
         "write" => write(&args),
         "read" => read(&args),
         "spawn-write" => spawn_write(&args),
-        "set-acl" => set_acl(&args),
         "broker-hello" => broker_hello(),
         "broker-write" => broker_write(&args),
         "sleep" => sleep(&args),
@@ -142,45 +140,6 @@ fn sleep(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("probe: invalid duration: {error}"))?;
     std::thread::sleep(std::time::Duration::from_millis(millis));
     Ok(())
-}
-
-#[cfg(windows)]
-fn set_acl(args: &[String]) -> Result<(), String> {
-    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
-    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-
-    let path = args.get(1).ok_or("probe: set-acl needs a path")?;
-    let wide: Vec<u16> = std::ffi::OsStr::new(path)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // A NULL DACL grants everyone full control: exactly the escalation the
-    // sandbox must prevent.
-    let code = unsafe {
-        SetNamedSecurityInfoW(
-            wide.as_ptr() as *mut u16,
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-        )
-    };
-    if code == 0 {
-        Err("set-acl succeeded: the sandbox did not prevent a DACL rewrite".to_string())
-    } else {
-        println!("set-acl denied ({code})");
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
-
-#[cfg(not(windows))]
-fn set_acl(_args: &[String]) -> Result<(), String> {
-    Err("probe: set-acl is only meaningful on Windows".to_string())
 }
 
 fn print_env(args: &[String]) -> Result<(), String> {

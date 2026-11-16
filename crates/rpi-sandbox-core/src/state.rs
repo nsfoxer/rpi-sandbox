@@ -1,8 +1,8 @@
 //! Cross-run bookkeeping locations.
 //!
 //! Everything the sandbox must remember between runs (the policy snapshot the
-//! extension reads, the Windows ACL journal, the launcher lock) lives under one
-//! directory so cleanup and diagnostics have a single place to look.
+//! extension reads, the launcher lock) lives under one directory so cleanup and
+//! diagnostics have a single place to look.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,11 +25,6 @@ pub fn state_dir() -> PathBuf {
         return PathBuf::from(home).join(".rpi/agent/sandbox");
     }
     std::env::temp_dir().join("rpi-sandbox")
-}
-
-/// Directory holding Windows ACL journals.
-pub fn acl_journal_dir() -> PathBuf {
-    state_dir().join("acl")
 }
 
 /// Path of the policy snapshot for one launcher run.

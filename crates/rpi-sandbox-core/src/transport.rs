@@ -5,7 +5,7 @@
 //!
 //! - Unix: a `0600` Unix domain socket in the temporary directory;
 //! - Windows: a named pipe `\\.\pipe\rpi-sandbox-<pid>-<nonce>` whose DACL only
-//!   grants the current user and the sandbox's capability SIDs.
+//!   grants the current user plus `ALL APPLICATION PACKAGES` for MXC.
 //!
 //! Everything above this module (broker, client, launcher supervision) is
 //! platform-neutral and shared.
@@ -382,11 +382,11 @@ mod imp {
     }
 
     /// Build the pipe DACL: owner full control, plus read/write for every
-    /// capability SID the launcher passes in.
+    /// extra SID the launcher passes in.
     ///
-    /// The restricted token created by the launcher checks write access against
-    /// its restricted SID list, so the sandboxed agent can only open the pipe
-    /// when one of those SIDs is granted here.
+    /// MXC workloads run in an AppContainer, which cannot open a pipe whose
+    /// DACL only grants the interactive user; the launcher adds
+    /// `ALL APPLICATION PACKAGES` (`S-1-15-2-1`).
     fn pipe_sddl(extra_sids: &[String]) -> String {
         let mut sddl = String::from("D:P");
         if let Some(user) = current_user_sid() {

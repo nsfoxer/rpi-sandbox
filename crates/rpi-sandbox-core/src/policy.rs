@@ -1,7 +1,7 @@
 //! Filesystem sandbox policy: path rules, configuration, and precedence.
 //!
 //! The policy only describes intent. Enforcement backends (Landlock, Seatbelt,
-//! Windows restricted tokens) are applied elsewhere; keeping the model free of
+//! MXC containers) are applied elsewhere; keeping the model free of
 //! platform code makes it unit-testable on every host.
 //!
 //! Precedence, from strongest to weakest:

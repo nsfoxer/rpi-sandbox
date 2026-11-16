@@ -33,8 +33,6 @@ Options:
   --no-broker          Do not start the approval broker
   --no-sandbox         Run without isolation (explicit bypass)
   --print-plan         Print the backend plan and exit without launching
-  --print-sid          Print the Windows capability SIDs and exit
-  --cleanup            Revoke sandbox ACLs left by earlier runs (Windows)
   --                   Pass the rest verbatim to rpi
   -h, --help           Show this help
   -V, --version        Show the rpis version
@@ -79,8 +77,6 @@ pub struct Args {
     pub broker: bool,
     pub enabled: Option<bool>,
     pub print_plan: bool,
-    pub print_sid: bool,
-    pub cleanup: bool,
     pub target: Vec<String>,
 }
 
@@ -99,8 +95,6 @@ impl Default for Args {
             broker: true,
             enabled: None,
             print_plan: false,
-            print_sid: false,
-            cleanup: false,
             target: Vec::new(),
         }
     }
@@ -164,8 +158,6 @@ pub fn parse_args<I: Iterator<Item = OsString>>(args: I) -> Result<Args, ParseEr
             "--no-sandbox" => parsed.enabled = Some(false),
             "--sandbox" => parsed.enabled = Some(true),
             "--print-plan" => parsed.print_plan = true,
-            "--print-sid" => parsed.print_sid = true,
-            "--cleanup" => parsed.cleanup = true,
             // Everything from the first unrecognized argument onwards belongs
             // to rpi, so `rpis -p "..."` works without a `--` separator.
             other => {
@@ -236,11 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_windows_specific_actions() {
-        let parsed = args(&["--print-plan", "--print-sid", "--cleanup"]).unwrap();
+    fn parses_the_plan_action() {
+        let parsed = args(&["--print-plan"]).unwrap();
         assert!(parsed.print_plan);
-        assert!(parsed.print_sid);
-        assert!(parsed.cleanup);
         assert!(parsed.target.is_empty());
     }
 

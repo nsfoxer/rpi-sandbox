@@ -7,7 +7,7 @@
 //! | backend | planning | launch |
 //! |---|---|---|
 //! | Landlock (Linux) | access masks + path rules | fork the broker, apply the domain to this process, `exec` |
-//! | restricted token (Windows) | allow/deny ACL entries | spawn the child with a restricted token, wait, revoke the ACL entries |
+//! | MXC (Windows) | read/write/denied path lists | spawn the child in a Microsoft Execution Container, wait |
 //! | Seatbelt (macOS, Phase 3) | SBPL text | fork the broker, `sandbox_init`, `execve` |
 //!
 //! Everything that is *not* platform-specific (CLI, policy compilation, target
@@ -36,16 +36,15 @@ use crate::probe::SandboxSupport;
 /// assumptions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackendCapabilities {
-    /// Stable backend name (`landlock`, `windows-restricted-token`,
-    /// `seatbelt`, `none`).
+    /// Stable backend name (`landlock`, `windows-mxc`, `seatbelt`, `none`).
     pub name: &'static str,
     /// Whether `protected` can be subtracted from inside a writable root.
     ///
-    /// Landlock is additive, so it cannot. Windows deny ACEs and Seatbelt
+    /// Landlock is additive, so it cannot. MXC `denied_paths` and Seatbelt
     /// rules can.
     pub can_subtract_protected: bool,
     /// Whether applying the sandbox mutates persistent state that must be
-    /// rolled back (Windows ACLs).
+    /// rolled back (legacy ACL backends). MXC never does.
     pub persistent_side_effects: bool,
     /// Whether the backend needs explicit read roots to start the target.
     pub needs_read_roots: bool,
@@ -182,9 +181,9 @@ pub enum BackendPlan {
     /// Landlock ruleset (Linux).
     #[cfg(target_os = "linux")]
     Landlock(crate::linux::LandlockPlan),
-    /// Windows allow/deny ACL entries.
+    /// Windows MXC filesystem policy.
     #[cfg(windows)]
-    Acl(crate::windows_plan::AclPlan),
+    Mxc(crate::mxc_plan::MxcPlan),
 }
 
 impl BackendPlan {
@@ -195,7 +194,7 @@ impl BackendPlan {
             #[cfg(target_os = "linux")]
             Self::Landlock(_) => "landlock",
             #[cfg(windows)]
-            Self::Acl(_) => "windows-restricted-token",
+            Self::Mxc(_) => "windows-mxc",
         }
     }
 
@@ -219,27 +218,7 @@ impl BackendPlan {
                 lines
             }
             #[cfg(windows)]
-            Self::Acl(plan) => {
-                let mut lines = vec!["backend: windows-restricted-token".to_string()];
-                for entry in &plan.allow {
-                    lines.push(format!(
-                        "  allow 0x{:x} {} (read+write)",
-                        entry.mask,
-                        entry.path.display()
-                    ));
-                }
-                for entry in &plan.deny {
-                    lines.push(format!(
-                        "  deny 0x{:x} {}",
-                        entry.mask,
-                        entry.path.display()
-                    ));
-                }
-                for path in &plan.skipped {
-                    lines.push(format!("  skip (missing) {}", path.display()));
-                }
-                lines
-            }
+            Self::Mxc(plan) => plan.describe(),
         }
     }
 }

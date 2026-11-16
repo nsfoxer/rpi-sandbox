@@ -1,18 +1,16 @@
-//! End-to-end checks for the Windows launcher.
+//! End-to-end checks for the Windows MXC launcher.
 //!
 //! Every test spawns the real launcher and the `rpi-sandbox-probe` payload, so
-//! the assertions cover the restricted token, the ACL edits, descendant
-//! inheritance, the named-pipe broker, and ACL cleanup.
+//! the assertions cover the MXC filesystem policy, descendant inheritance, the
+//! named-pipe broker, and exit-code propagation.
 //!
-//! Tests are skipped when the platform probe reports no backend (for example on
-//! a Windows build without restricted-token support).
+//! Tests are skipped when the MXC backend reports no support.
 
 #![cfg(target_os = "windows")]
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
 
 use rpi_sandbox_core::{ApprovalScope, BrokerClient, WriteOp};
 
@@ -27,9 +25,8 @@ fn probe() -> &'static str {
 /// One test workspace: a writable project dir, a dir outside every writable
 /// root, and an isolated agent/state directory.
 ///
-/// The root deliberately lives under `%LOCALAPPDATA%`, not `%TEMP%`: the policy
-/// makes the system temp directory writable, so a temp-based "outside" dir would
-/// really be inside the allowlist.
+/// The root lives under `%LOCALAPPDATA%`, not `%TEMP%`: MXC exposes the system
+/// temp directory as writable.
 struct Layout {
     root: PathBuf,
 }
@@ -72,10 +69,6 @@ impl Layout {
         self.root.join("state")
     }
 
-    fn root(&self) -> &Path {
-        &self.root
-    }
-
     fn base(&self) -> Command {
         let mut command = Command::new(launcher());
         command
@@ -94,6 +87,12 @@ impl Layout {
     }
 }
 
+impl Drop for Layout {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 fn supported() -> bool {
     rpi_sandbox_core::probe().is_supported()
 }
@@ -102,7 +101,7 @@ fn skip() -> bool {
     if supported() {
         false
     } else {
-        eprintln!("restricted-token backend unavailable; skipping");
+        eprintln!("MXC backend unavailable; skipping");
         true
     }
 }
@@ -185,23 +184,6 @@ fn descendants_inherit_the_restriction() {
 }
 
 #[test]
-fn the_sandbox_cannot_rewrite_its_own_dacl() {
-    if skip() {
-        return;
-    }
-    let layout = Layout::new();
-    let target = layout.work().join("acl.txt");
-    std::fs::write(&target, "x").unwrap();
-    let output = layout.run(&["set-acl", target.to_str().unwrap()]);
-    assert!(output.status.success(), "probe failed: {}", stderr(&output));
-    assert!(
-        stdout(&output).contains("set-acl denied"),
-        "the DACL rewrite must be denied: {}",
-        stdout(&output)
-    );
-}
-
-#[test]
 fn broker_serves_approvals_over_the_named_pipe() {
     if skip() {
         return;
@@ -213,7 +195,7 @@ fn broker_serves_approvals_over_the_named_pipe() {
         .arg("--rpi")
         .arg(probe())
         .arg("--")
-        .args(["hold", "4000"])
+        .args(["hold", "6000"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -233,7 +215,7 @@ fn broker_serves_approvals_over_the_named_pipe() {
 
     let client = BrokerClient::connect(Path::new(endpoint)).expect("connect to the broker");
     let hello = client.hello("rpi-sandbox-test", "0.1.0").unwrap();
-    assert_eq!(hello.sandbox.as_deref(), Some("windows-restricted-token"));
+    assert_eq!(hello.sandbox.as_deref(), Some("windows-mxc"));
     assert_eq!(hello.profile.as_deref(), Some("default"));
 
     let outside = layout.deny().join("broker.txt");
@@ -257,81 +239,6 @@ fn broker_serves_approvals_over_the_named_pipe() {
 
     let status = child.wait().unwrap();
     assert!(status.success(), "launcher exited with {status}");
-}
-
-#[test]
-fn acl_edits_are_revoked_on_exit() {
-    if skip() {
-        return;
-    }
-    let layout = Layout::new();
-    let (read_sid, write_sid) = capability_sids(&layout);
-    let output = layout.run(&["write", layout.work().join("a.txt").to_str().unwrap(), "x"]);
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(
-        !acl_contains(&layout.work(), &write_sid),
-        "the write capability SID must be removed on exit"
-    );
-    // Read roots get an ACE too (the target's ACL may only grant the user).
-    assert!(
-        !acl_contains(&layout.agent(), &read_sid),
-        "the read capability SID must be removed on exit"
-    );
-    // The journal must be gone as well.
-    let journals = std::fs::read_dir(layout.state().join("acl"))
-        .map(|entries| entries.count())
-        .unwrap_or(0);
-    assert_eq!(journals, 0, "no journal may survive a clean run");
-}
-
-#[test]
-fn orphaned_acl_edits_are_recovered_on_the_next_run() {
-    if skip() {
-        return;
-    }
-    let layout = Layout::new();
-    let (_, sid) = capability_sids(&layout);
-    let mut child = layout
-        .base()
-        .arg("--no-extension")
-        .arg("--rpi")
-        .arg(probe())
-        .arg("--")
-        .args(["hold", "8000"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the launcher");
-
-    // Wait until the ACE is applied.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && !acl_contains(&layout.work(), &sid) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(
-        acl_contains(&layout.work(), &sid),
-        "the ACE was never applied"
-    );
-
-    // Simulate a killed launcher: the journal stays behind.
-    child.kill().unwrap();
-    let _ = child.wait();
-    let journals = std::fs::read_dir(layout.state().join("acl"))
-        .map(|entries| entries.count())
-        .unwrap_or(0);
-    assert_eq!(journals, 1, "the orphaned run must leave a journal");
-
-    // The next run sweeps the journal before applying its own plan.
-    let output = layout.run(&[
-        "write",
-        layout.work().join("after.txt").to_str().unwrap(),
-        "x",
-    ]);
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(
-        !acl_contains(&layout.work(), &sid),
-        "orphaned ACE must be revoked by the next run"
-    );
 }
 
 #[test]
@@ -361,7 +268,7 @@ fn cli_paths_are_exported_to_the_extension() {
         return;
     }
     let layout = Layout::new();
-    let extra = layout.root().join("extra");
+    let extra = layout.root.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     let mut command = layout.base();
     command
@@ -390,62 +297,20 @@ fn exit_codes_are_propagated() {
 }
 
 #[test]
-fn print_plan_describes_the_backend_without_touching_acls() {
+fn print_plan_names_mxc_without_creating_any_container() {
     if skip() {
         return;
     }
     let layout = Layout::new();
-    let (_, sid) = capability_sids(&layout);
     let mut command = layout.base();
     command.arg("--print-plan");
     let output = command.output().expect("spawn the launcher");
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("windows-restricted-token"), "{text}");
+    assert!(text.contains("windows-mxc"), "{text}");
     assert!(text.contains("work"), "{text}");
     assert!(
-        !acl_contains(&layout.work(), &sid),
-        "--print-plan must not modify the filesystem"
+        !layout.state().exists(),
+        "--print-plan must not touch the filesystem"
     );
-}
-
-impl Drop for Layout {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-/// Capability SIDs for this layout, as printed by `--print-sid`.
-fn capability_sids(layout: &Layout) -> (String, String) {
-    let mut command = layout.base();
-    command.arg("--print-sid");
-    let output = command.output().expect("spawn --print-sid");
-    assert!(output.status.success(), "{}", stderr(&output));
-    let text = stdout(&output);
-    let read = sid_line(&text, "read");
-    let write = sid_line(&text, "write");
-    (read, write)
-}
-
-fn sid_line(text: &str, kind: &str) -> String {
-    text.lines()
-        .find_map(|line| line.trim().strip_prefix(kind).map(str::trim))
-        .and_then(|line| line.strip_prefix('='))
-        .map(|line| line.trim().to_string())
-        .unwrap_or_else(|| {
-            panic!(
-                "{kind} SID line missing from:
-{text}"
-            )
-        })
-}
-
-/// Whether `icacls` reports the SID on `path`.
-fn acl_contains(path: &Path, sid: &str) -> bool {
-    let output = Command::new("icacls")
-        .arg(path)
-        .output()
-        .expect("run icacls");
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.contains(sid)
 }

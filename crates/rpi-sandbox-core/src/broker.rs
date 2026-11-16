@@ -1,6 +1,6 @@
 //! Out-of-process write broker.
 //!
-//! Kernel sandboxes (Landlock, Seatbelt, Windows restricted tokens) can only
+//! Kernel sandboxes (Landlock, Seatbelt, MXC) can only
 //! narrow permissions, never widen them at runtime. Dynamic approval therefore
 //! needs one unconfined helper process: the broker started by the launcher
 //! before the sandbox is applied. The sandboxed agent asks the broker to perform
