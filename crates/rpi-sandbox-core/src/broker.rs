@@ -18,14 +18,14 @@
 //! equivalent platform APIs and is tracked as a hardening task.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 
 use crate::approval::{ApprovalScope, WriteOp};
+use crate::audit::{AuditEvent, AuditLog};
 use crate::path::{absolute_lexical, normalize_and_resolve};
 use crate::policy::PathRule;
 use crate::protocol::{
@@ -173,33 +173,77 @@ impl ApprovalStore {
 /// The broker is single-threaded and processes requests in order, matching the
 /// protocol contract. Audit failures never abort a mutation.
 pub fn serve<R: BufRead, W: Write>(
-    mut reader: R,
-    mut writer: W,
+    reader: R,
+    writer: W,
     config: BrokerConfig,
 ) -> std::io::Result<()> {
-    let mut store = ApprovalStore::default();
-    let mut audit = open_audit(config.audit.as_deref());
-    loop {
-        match read_frame(&mut reader, config.max_frame())? {
-            Frame::Eof => break,
-            Frame::TooLarge => {
-                let message = format!("request exceeds {} bytes", config.max_payload);
-                log_audit(&mut audit, "protocol", "-", false, Some(&message), None);
-                write_response(
-                    &mut writer,
-                    Response::failure(0, ErrorCode::TooLarge, message),
-                )?;
-            }
-            Frame::Line(line) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let response = handle_line(&mut store, &line, &config, &mut audit);
-                write_response(&mut writer, response)?;
-            }
+    BrokerService::new(config).serve_connection(reader, writer)
+}
+
+/// Session-scoped broker state.
+///
+/// Splitting the state from a single connection is what lets the launcher
+/// accept a reconnect (extension reload, pipe hiccup) without losing the
+/// user's approvals: one [`BrokerService`] serves every connection of a
+/// session.
+pub struct BrokerService {
+    store: ApprovalStore,
+    config: BrokerConfig,
+    audit: AuditLog,
+}
+
+impl BrokerService {
+    /// Create a service for one session.
+    pub fn new(config: BrokerConfig) -> Self {
+        let audit = AuditLog::open(config.audit.as_deref());
+        Self {
+            store: ApprovalStore::default(),
+            config,
+            audit,
         }
     }
-    Ok(())
+
+    /// Broker configuration in use.
+    pub fn config(&self) -> &BrokerConfig {
+        &self.config
+    }
+
+    /// Serve one connection until the peer disconnects.
+    pub fn serve_connection<R: BufRead, W: Write>(
+        &mut self,
+        mut reader: R,
+        mut writer: W,
+    ) -> std::io::Result<()> {
+        loop {
+            match read_frame(&mut reader, self.config.max_frame())? {
+                Frame::Eof => break,
+                Frame::TooLarge => {
+                    let message = format!("request exceeds {} bytes", self.config.max_payload);
+                    log_audit(
+                        &mut self.audit,
+                        "protocol",
+                        "-",
+                        false,
+                        Some(&message),
+                        None,
+                    );
+                    write_response(
+                        &mut writer,
+                        Response::failure(0, ErrorCode::TooLarge, message),
+                    )?;
+                }
+                Frame::Line(line) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let response =
+                        handle_line(&mut self.store, &line, &self.config, &mut self.audit);
+                    write_response(&mut writer, response)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn write_response<W: Write>(writer: &mut W, response: Response) -> std::io::Result<()> {
@@ -212,7 +256,7 @@ fn handle_line(
     store: &mut ApprovalStore,
     line: &str,
     config: &BrokerConfig,
-    audit: &mut Option<File>,
+    audit: &mut AuditLog,
 ) -> Response {
     let value: serde_json::Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -292,7 +336,7 @@ fn handle_request(
     store: &mut ApprovalStore,
     request: Request,
     config: &BrokerConfig,
-    audit: &mut Option<File>,
+    audit: &mut AuditLog,
 ) -> Response {
     let id = request.id;
     let name = request.operation.name();
@@ -470,6 +514,8 @@ fn parse_request_path(raw: &str) -> Result<(PathBuf, PathBuf), BrokerError> {
             format!("path must be absolute and must not escape the root: {raw}"),
         )
     })?;
+    crate::path::validate_local_path(&lexical)
+        .map_err(|error| BrokerError::new(ErrorCode::InvalidPath, error))?;
     let resolved = normalize_and_resolve(&lexical);
     Ok((lexical, resolved))
 }
@@ -574,65 +620,33 @@ fn io_error(error: std::io::Error) -> BrokerError {
     let code = match error.raw_os_error() {
         #[cfg(unix)]
         Some(libc::ELOOP) => ErrorCode::UnsafePath,
+        // ERROR_ACCESS_DENIED: the active backend refused the write (for
+        // example a Windows deny ACE on a protected path).
+        Some(5) => ErrorCode::PermissionDenied,
         _ => ErrorCode::Io,
     };
     BrokerError::new(code, error.to_string())
 }
 
-fn open_audit(path: Option<&Path>) -> Option<File> {
-    let path = path?;
-    if let Some(parent) = path.parent() {
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            eprintln!(
-                "warning: sandbox audit directory {} is unavailable: {error}",
-                parent.display()
-            );
-        }
-    }
-    match OpenOptions::new().create(true).append(true).open(path) {
-        Ok(file) => Some(file),
-        Err(error) => {
-            eprintln!(
-                "warning: sandbox audit log {} is unavailable: {error}",
-                path.display()
-            );
-            None
-        }
-    }
-}
-
 fn log_audit(
-    audit: &mut Option<File>,
+    audit: &mut AuditLog,
     operation: &str,
     path: &str,
     ok: bool,
     error: Option<&str>,
     scope: Option<&str>,
 ) {
-    let Some(file) = audit else {
-        return;
-    };
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    let entry = serde_json::json!({
-        "time": seconds,
-        "op": operation,
-        "path": path,
-        "ok": ok,
-        "error": error,
-        "scope": scope,
+    audit.record(AuditEvent {
+        op: operation,
+        path,
+        ok,
+        error,
+        scope,
     });
-    if let Err(failure) = writeln!(file, "{entry}").and_then(|()| file.flush()) {
-        eprintln!("warning: sandbox audit write failed: {failure}");
-    }
 }
 
-#[cfg(unix)]
 pub use client::{BrokerClient, Hello, WriteBroker};
 
-#[cfg(unix)]
 mod client {
     use std::io::{BufReader, Write};
     use std::path::Path;
@@ -641,6 +655,7 @@ mod client {
     use std::time::Duration;
 
     use super::*;
+    use crate::transport::Conn;
 
     /// Default request timeout (see `docs/protocol.md` §7).
     pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -655,8 +670,8 @@ mod client {
     }
 
     struct ClientState {
-        writer: std::os::unix::net::UnixStream,
-        reader: BufReader<std::os::unix::net::UnixStream>,
+        writer: Conn,
+        reader: BufReader<Conn>,
     }
 
     /// Client used by the sandboxed agent to ask the broker for approved writes.
@@ -666,17 +681,20 @@ mod client {
     }
 
     impl BrokerClient {
-        /// Connect to the broker socket with the default timeout.
+        /// Connect to the broker endpoint with the default timeout.
         pub fn connect(path: &Path) -> Result<Self, BrokerError> {
             Self::connect_with_timeout(path, Some(DEFAULT_TIMEOUT))
         }
 
-        /// Connect to the broker socket with an explicit timeout.
+        /// Connect to the broker endpoint with an explicit timeout.
+        ///
+        /// Windows named pipes are synchronous and have no per-call timeout, so
+        /// the timeout is only enforced on Unix.
         pub fn connect_with_timeout(
             path: &Path,
             timeout: Option<Duration>,
         ) -> Result<Self, BrokerError> {
-            let writer = std::os::unix::net::UnixStream::connect(path).map_err(client_io)?;
+            let writer = Conn::connect(path).map_err(client_io)?;
             if let Some(timeout) = timeout {
                 writer.set_read_timeout(Some(timeout)).map_err(client_io)?;
                 writer.set_write_timeout(Some(timeout)).map_err(client_io)?;
@@ -1560,10 +1578,16 @@ mod tests {
 
     #[test]
     fn malformed_base64_is_internal() {
-        let responses = run_raw(
-            r#"{"v":1,"id":1,"op":"write","path":"/tmp/x","data":"***","append":false}"#,
-            BrokerConfig::default(),
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let request = serde_json::json!({
+            "v": PROTOCOL_VERSION,
+            "id": 1,
+            "op": "write",
+            "path": dir.path().join("x").to_string_lossy(),
+            "data": "***",
+            "append": false,
+        });
+        let responses = run_raw(&format!("{request}\n"), BrokerConfig::default());
         assert_eq!(responses[0].code, Some(ErrorCode::Internal));
     }
 
@@ -1594,33 +1618,33 @@ mod tests {
         assert_eq!(store.check(&file, WriteOp::Create), None);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn client_round_trip_over_a_unix_socket() {
-        use std::os::unix::net::UnixListener;
+    fn client_round_trip_over_the_native_transport() {
+        use crate::transport::Listener;
+        use std::io::BufReader;
 
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("broker.sock");
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        let listener = Listener::bind().unwrap();
+        let endpoint = listener.name().to_path_buf();
         let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let conn = listener.accept().unwrap();
+            let reader = BufReader::new(conn.try_clone().unwrap());
             serve(
                 reader,
-                stream,
+                conn,
                 BrokerConfig {
-                    backend: Some("landlock".to_string()),
+                    backend: Some("test-backend".to_string()),
                     ..BrokerConfig::default()
                 },
             )
             .unwrap();
         });
 
-        let client = BrokerClient::connect(&socket_path).unwrap();
+        let client = BrokerClient::connect(&endpoint).unwrap();
         let hello = client.hello("rpi-sandbox-extension", "0.1.0").unwrap();
-        assert_eq!(hello.sandbox.as_deref(), Some("landlock"));
+        assert_eq!(hello.sandbox.as_deref(), Some("test-backend"));
 
-        let target = dir.path().join("client.txt");
+        let target = tempfile::tempdir().unwrap();
+        let target = target.path().join("client.txt");
         let error = client.write(&target, b"no").unwrap_err();
         assert_eq!(error.code, ErrorCode::NotApproved);
 

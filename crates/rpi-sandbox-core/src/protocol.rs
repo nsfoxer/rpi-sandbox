@@ -34,6 +34,15 @@ pub mod env {
     pub const WRITABLE: &str = "RPI_SANDBOX_WRITABLE";
     /// Newline-separated `--protect` paths from the launcher.
     pub const PROTECTED: &str = "RPI_SANDBOX_PROTECTED";
+    /// Path of the launcher's compiled policy snapshot (JSON).
+    ///
+    /// The extension prefers this file over re-compiling configuration, so the
+    /// kernel boundary and the tool gating can never disagree.
+    pub const POLICY: &str = "RPI_SANDBOX_POLICY";
+    /// Every variable above, for wholesale removal before re-applying them.
+    pub const ALL: [&str; 8] = [
+        ACTIVE, SOCKET, PROFILE, VERSION, CONFIG, WRITABLE, PROTECTED, POLICY,
+    ];
 }
 
 /// One request frame.
@@ -240,6 +249,8 @@ pub enum ErrorCode {
     UnsafePath,
     /// Path is protected by policy; approvals cannot override it.
     Protected,
+    /// The active sandbox backend refused the write (`EACCES` / access denied).
+    PermissionDenied,
     /// Underlying I/O failure.
     Io,
     /// Frame or payload exceeds the configured limit.
@@ -262,6 +273,7 @@ impl ErrorCode {
             Self::InvalidPath => "invalid_path",
             Self::UnsafePath => "unsafe_path",
             Self::Protected => "protected",
+            Self::PermissionDenied => "permission_denied",
             Self::Io => "io",
             Self::TooLarge => "too_large",
             Self::Unsupported => "unsupported",

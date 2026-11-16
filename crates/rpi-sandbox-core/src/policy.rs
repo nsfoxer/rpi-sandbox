@@ -89,7 +89,8 @@ pub struct SandboxSettings {
 }
 
 /// One compiled allow/deny rule.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PathRule {
     /// A directory and everything below it.
     Dir(PathBuf),
@@ -145,13 +146,74 @@ pub struct PolicyContext {
 
 impl PolicyContext {
     /// Build a context from the current process environment.
+    ///
+    /// Platform-native precedence matters: MSYS2/Git Bash may export `HOME` as
+    /// `/c/Users/...` and `TMPDIR` as `/tmp`, neither of which is a valid
+    /// Windows path. On Windows the native variables win.
     pub fn from_env(cwd: PathBuf) -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let temp = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        Self { cwd, home, temp }
+        Self {
+            cwd,
+            home: home_dir(),
+            temp: temp_dir(),
+        }
     }
+}
+
+/// User home directory, using platform-native precedence.
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        home_dir_from(std::env::var_os("USERPROFILE"), std::env::var_os("HOME"))
+    }
+    #[cfg(not(windows))]
+    {
+        home_dir_from(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+    }
+}
+
+/// System temporary directory, using platform-native precedence.
+///
+/// There is always a usable value: [`std::env::temp_dir`] is the last resort.
+pub fn temp_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        temp_dir_from(&[
+            std::env::var_os("TEMP"),
+            std::env::var_os("TMP"),
+            std::env::var_os("TMPDIR"),
+        ])
+    }
+    #[cfg(not(windows))]
+    {
+        temp_dir_from(&[std::env::var_os("TMPDIR")])
+    }
+}
+
+/// Resolve the home directory from candidate variables (first non-empty wins).
+pub fn home_dir_from(
+    primary: Option<std::ffi::OsString>,
+    fallback: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    for candidate in [primary, fallback] {
+        if let Some(value) = candidate {
+            if !value.is_empty() {
+                return Some(PathBuf::from(value));
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the temporary directory from ordered candidates.
+pub fn temp_dir_from(candidates: &[Option<std::ffi::OsString>]) -> PathBuf {
+    for candidate in candidates {
+        if let Some(value) = candidate {
+            if !value.is_empty() {
+                return PathBuf::from(value);
+            }
+        }
+    }
+    std::env::temp_dir()
 }
 
 /// Explicit command-line overrides. These are user intent and may both widen
@@ -171,7 +233,11 @@ pub struct PolicyOverrides {
 }
 
 /// Compiled, platform-independent sandbox policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Serialized as the launcher's policy snapshot (`RPI_SANDBOX_POLICY`), which
+/// the extension loads instead of re-deriving the same rules.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct SandboxPolicy {
     /// Whether enforcement should be attempted.
     pub enabled: bool,
@@ -228,6 +294,19 @@ impl ProtectionGap {
             self,
             Self::ProtectedInsideWritable { .. } | Self::MissingProtected { .. }
         )
+    }
+
+    /// Whether this gap means `capabilities` cannot enforce `protected`.
+    ///
+    /// Landlock is additive, so a protected subtree inside a writable root is
+    /// unenforceable there; Windows deny ACEs and Seatbelt rules can subtract
+    /// it. A missing protected path cannot be enforced anywhere.
+    pub fn blocks_enforcement(&self, capabilities: crate::backend::BackendCapabilities) -> bool {
+        match self {
+            Self::ProtectedInsideWritable { .. } => !capabilities.can_subtract_protected,
+            Self::MissingProtected { .. } => true,
+            Self::AllowFileWriteProtected { .. } => false,
+        }
     }
 
     /// Human-readable explanation used by the launcher and `/sandbox`.
@@ -550,6 +629,30 @@ mod tests {
 
     fn settings(json: &str) -> SandboxSettings {
         serde_json::from_str(json).expect("valid settings")
+    }
+
+    #[test]
+    fn temp_dir_prefers_the_first_non_empty_candidate() {
+        use std::ffi::OsString;
+        let candidates = [
+            Some(OsString::from("")),
+            None,
+            Some(OsString::from(r"C:\Temp")),
+            Some(OsString::from("ignored")),
+        ];
+        assert_eq!(temp_dir_from(&candidates), PathBuf::from(r"C:\Temp"));
+        // An empty candidate list still yields the platform temp dir.
+        assert!(!temp_dir_from(&[]).as_os_str().is_empty());
+    }
+
+    #[test]
+    fn home_dir_from_skips_missing_and_empty_values() {
+        use std::ffi::OsString;
+        assert_eq!(
+            home_dir_from(Some(OsString::from("")), Some(OsString::from("/home/u"))),
+            Some(PathBuf::from("/home/u"))
+        );
+        assert_eq!(home_dir_from(None, None), None);
     }
 
     #[test]

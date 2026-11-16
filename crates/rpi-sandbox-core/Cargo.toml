@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Filesystem sandbox policy, protocol, Landlock planner, and approval broker for rpi"
+description = "Filesystem sandbox policy, protocol, transport, and approval broker for rpi"
 
 [dependencies]
 base64.workspace = true
@@ -13,6 +13,9 @@ serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

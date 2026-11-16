@@ -16,6 +16,8 @@ pub enum SandboxBackend {
     Seatbelt,
     /// Windows restricted token with a synthetic SID.
     WindowsRestrictedToken,
+    /// No confinement mechanism (explicit `--no-sandbox`).
+    None,
 }
 
 impl SandboxBackend {
@@ -25,6 +27,7 @@ impl SandboxBackend {
             Self::Landlock { .. } => "landlock",
             Self::Seatbelt => "seatbelt",
             Self::WindowsRestrictedToken => "windows-restricted-token",
+            Self::None => "none",
         }
     }
 }
@@ -89,9 +92,7 @@ pub fn probe() -> SandboxSupport {
     }
     #[cfg(target_os = "windows")]
     {
-        return SandboxSupport::Unsupported {
-            reason: "Windows restricted-token backend is not implemented yet".to_string(),
-        };
+        return probe_windows();
     }
     #[allow(unreachable_code)]
     SandboxSupport::Unsupported {
@@ -140,6 +141,83 @@ pub(crate) fn landlock_abi() -> Result<u32, String> {
     })
 }
 
+/// Probe by building and discarding one restricted token.
+///
+/// `CreateRestrictedToken` is the only Windows API the backend cannot do
+/// without; if it succeeds for the current user, ACL-based enforcement is
+/// available. This touches no filesystem state.
+#[cfg(target_os = "windows")]
+fn probe_windows() -> SandboxSupport {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        CreateRestrictedToken, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // Documented flag values (windows-sys does not define them).
+    const DISABLE_MAX_PRIVILEGE: u32 = 0x01;
+    const LUA_TOKEN: u32 = 0x04;
+    const WRITE_RESTRICTED: u32 = 0x08;
+
+    let mut base: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo-handle is valid and the returned token is closed.
+    let ok = unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_DUPLICATE | TOKEN_QUERY,
+            &mut base,
+        )
+    };
+    if ok == 0 {
+        return SandboxSupport::Unsupported {
+            reason: format!(
+                "cannot open the process token: {}",
+                std::io::Error::last_os_error()
+            ),
+        };
+    }
+
+    // `Everyone` (S-1-1-0) is only used to make the probe token realistically
+    // restricted; it is never added to any ACL.
+    let mut everyone: [u8; 12] = [0x01, 0x01, 0, 0, 0, 0, 0, 5, 0x01, 0, 0, 0];
+    let entries = [SID_AND_ATTRIBUTES {
+        Sid: everyone.as_mut_ptr() as windows_sys::Win32::Security::PSID,
+        Attributes: 0,
+    }];
+    let mut restricted: HANDLE = std::ptr::null_mut();
+    // SAFETY: `base` is a valid token, `entries` points at one valid SID, and
+    // the new handle is closed below.
+    let ok = unsafe {
+        CreateRestrictedToken(
+            base,
+            DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED,
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            entries.len() as u32,
+            entries.as_ptr(),
+            &mut restricted,
+        )
+    };
+    // SAFETY: both handles are owned by this function.
+    unsafe {
+        CloseHandle(base);
+        if !restricted.is_null() {
+            CloseHandle(restricted);
+        }
+    }
+    if ok == 0 {
+        return SandboxSupport::Unsupported {
+            reason: format!(
+                "cannot create a restricted token: {}",
+                std::io::Error::last_os_error()
+            ),
+        };
+    }
+    SandboxSupport::Supported(SandboxBackend::WindowsRestrictedToken)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +241,16 @@ mod tests {
         assert_eq!(
             SandboxBackend::WindowsRestrictedToken.name(),
             "windows-restricted-token"
+        );
+        assert_eq!(SandboxBackend::None.name(), "none");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reports_the_restricted_token_backend() {
+        assert_eq!(
+            probe(),
+            SandboxSupport::Supported(SandboxBackend::WindowsRestrictedToken)
         );
     }
 }
