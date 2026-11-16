@@ -86,8 +86,8 @@
 - [x] `core::backend`：`BackendCapabilities` / `BackendPlan` / `LaunchSpec` / `SandboxBackend`
 - [x] `core::transport`：Unix socket / Windows 命名管道统一为 `Listener` + `Conn`
 - [x] `BrokerService`：状态与连接分离，支持重连；`serve()` 保持兼容
-- [x] `core::state` / `core::audit` / `windows_plan`（可在任意宿主上单测）
-- [x] launcher 拆分为 `args` / `setup` / `linux` / `windows`，共享层只写一份
+- [x] `core::state` / `core::audit` / `mxc_plan`（可在任意宿主上单测）
+- [x] launcher 拆分为 `args` / `setup` / `linux` / `mxc`，共享层只写一份
 - [x] 策略快照（`RPI_SANDBOX_POLICY`）：扩展优先读取，隔离时与内核策略一致
 - [x] 跨平台测试探针 `rpi-sandbox-probe`：Linux / Windows 用同一套断言
 
@@ -108,27 +108,28 @@
 
 ## Phase 4：Windows 后端（已完成）
 
-状态：**已完成**（2026-11，Windows 11 实测）。
+状态：**已完成**（2026-11，Windows 11 26H2 实测）。最终实现改用 **MXC**，
+旧的 restricted token + ACL 方案已移除。
 
 ### 任务
 
-- [x] restricted token + 合成 SID + ACL 事务（`WRITE_RESTRICTED`）
-- [x] 以受限 token 启动 rpi；broker 用正常 token + 命名管道
-- [x] 崩溃清理：journal + 下次启动回收 + `--cleanup`
-- [x] `bcrypt.dll` / rustls 兼容：提供 `bcrypt-shim/` + 退出码提示（根因修复写进文档）
-- [x] 集成测试：允许/拒绝/子进程/授权/ACL 清理/journal 回收/退出码/`--print-plan`
-- [x] 卷 ACL 能力检查（exFAT/FAT32/网络共享）
-- [x] 沙箱内禁止改写自身 DACL（防止自我提权）
+- [x] MXC `processcontainer` + 命名管道 broker
+- [x] 策略映射：`writable` / `read_roots` / `protected` → write / read / deny 路径
+- [x] 读白名单、网络 egress、Win32k（ole32 初始化）适配
+- [x] MXC 不支持时自动降级为不隔离（`required` 拒绝）
+- [x] 集成测试：允许/拒绝/子进程/授权/退出码/`--print-plan`
+- [x] 启动/退出 O(1)，不修改 ACL
 
 ### 验收
 
-- [x] 11 个 Windows 集成测试通过；
-- [x] 无残留 ACL；未授权写失败且错误可读（`Access is denied (os error 5)`）；
-- [x] `rpi.exe` 在受限 token 下真实启动、加载插件、完成模型请求。
+- [x] 8 个 Windows 集成测试通过；
+- [x] 未授权写失败且错误可读（`Access is denied (os error 5)`）；
+- [x] `rpi.exe` 在 MXC 容器中真实启动、加载插件、完成模型请求；
+- [x] 启动 + 退出约 0.5s（不随项目大小增长）。
 
 ## Phase 5：加固与扩展（持续）
 
-- [ ] 读限制（Landlock `READ_FILE/READ_DIR`、SBPL、ACL）
+- [ ] 读限制（Landlock `READ_FILE/READ_DIR`、SBPL；Windows MXC 已支持 `denied_paths`）
 - [ ] broker 写入加固：`openat2(RESOLVE_BENEATH)` 消除父目录符号链接竞态
 - [ ] Linux 嵌套内核只读：userns + mount namespace + 只读 bind + 丢 caps（`protected` 透明生效）
 - [ ] 网络限制（Landlock ABI 4+、SBPL、Windows Firewall/WFP）
@@ -145,7 +146,7 @@
 | Landlock 只能加权限，不能扣除嵌套 `protected` | 策略不完整 | 启动告警 / `required` 拒绝；Phase 5 目录枚举方案 |
 | Landlock 规则绑定 inode | 目录重建后失效 | 文档说明，重启恢复 |
 | macOS Seatbelt API deprecated | 未来可能移除 | 隔离封装，保留 `sandbox-exec` 回退 |
-| Windows ACL 残留 / bcrypt 兼容 | 启动失败或权限泄漏 | 事务 + 清理 + crypto provider 切换 |
+| MXC 不可用 / Windows 版本过旧 | 自动降级为不隔离 | 明确告警；`mode = required` 拒绝启动 |
 | 扩展无法覆盖原生插件 | 边界不完整 | 明确整进程由 launcher 提供 |
 | 越权写由 broker 完成后 veto，模型看到通用 blocked 消息 | 结果展示不精确 | 后续用同名 `write`/`edit` 工具替换，返回真实结果 |
 | 维护者不接受新模式 | 返工 | 先提交短 proposal，再实现 |

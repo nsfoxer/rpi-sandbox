@@ -57,7 +57,7 @@
 | 类型 | 作用 |
 |---|---|
 | `BackendCapabilities` | 该后端能强制什么（能否扣除 protected、是否有持久副作用、是否需要读根…） |
-| `BackendPlan` | 后端计划（Landlock 规则 / ACL 条目 / 无），可用 `--print-plan` 打印、可跨平台单测 |
+| `BackendPlan` | 后端计划（Landlock 规则 / MXC 路径策略 / 无），可用 `--print-plan` 打印、可跨平台单测 |
 | `SandboxBackend` | `plan(policy)` + `launch(plan, spec)`；`launch` **允许不返回**（Unix 内部 `exec`） |
 
 `LaunchSpec` 里已包含 CLI 解析结果、编译后的策略、环境变量增删、扩展注入后的参数、broker
@@ -69,8 +69,9 @@
 2. 建立 broker 端点（Unix socket / Windows 命名管道）；broker 不加载插件、不解析模型输出。
 3. 应用隔离：
    - Linux / macOS：对**自身**应用域（Landlock / Seatbelt），随后 `exec rpi`；
-   - Windows：不能给自己降权，改为构造 restricted token 并 `CreateProcessAsUserW`，
-     父进程保持不受限、等待子进程并撤销 ACL。
+   - Windows：用 `mxc-sdk` 创建 MXC 容器（`Containment::Process`），把 `writable` /
+     `read_roots` / `protected` 映射为 `readwrite_paths` / `readonly_paths` /
+     `denied_paths`；父进程保持不受限，作为 broker 并等待容器退出。
 4. 此后创建的所有线程和子进程都继承该边界。
 5. rpi 加载扩展。扩展发现自己处于沙箱内（环境变量），开始执行策略与 UI。
 
@@ -97,9 +98,9 @@
 - 平台后端：
   - Linux：Landlock，`exec` 前对启动器自身应用。
   - macOS：Seatbelt，`sandbox_init` 后 `execve`；沙箱随 exec 继承。
-  - Windows：restricted token + 合成 SID + ACL，以受限 token 启动 rpi。
+  - Windows：MXC `processcontainer`，把策略映射为容器文件系统规则；不修改 ACL。
 - broker 协议见 `protocol.md`。
-- 退出码、信号与子进程状态透传；崩溃时清理 ACL / socket。
+- 退出码、信号与子进程状态透传；崩溃时清理 socket（MXC 没有 ACL 残留）。
 
 ### sandbox 扩展
 
@@ -124,7 +125,7 @@
 
 | 场景 | 行为 |
 |---|---|
-| 经 launcher 启动 | 整进程边界（Landlock 域 / restricted token + ACL）；扩展负责策略与授权 |
+| 经 launcher 启动 | 整进程边界（Landlock 域 / MXC 容器）；扩展负责策略与授权 |
 | 未经 launcher 启动 | 扩展提示“当前未隔离”；可选降级为工具级 gating（advisory） |
 | launcher 不支持当前平台 | 按配置：警告并继续，或拒绝启动（`required`） |
 | 用户关闭沙箱 | launcher 直接 `exec rpi`；扩展可提示沙箱未启用 |

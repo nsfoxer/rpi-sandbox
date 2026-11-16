@@ -20,11 +20,14 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `RPI_SANDBOX_WRITABLE` | 换行分隔的 `--write` 路径（仅隔离时设置） |
 | `RPI_SANDBOX_PROTECTED` | 换行分隔的 `--protect` 路径（仅隔离时设置） |
 
-命名管道的 DACL 只授当前用户与本次运行的两个 capability SID：
+命名管道的 DACL 授予当前用户与 `ALL APPLICATION PACKAGES`（`S-1-15-2-1`）：
 
 ```text
-D:P(A;;GA;;;<current user>)(A;;GA;;;<read SID>)(A;;GA;;;<write SID>)
+D:P(A;;GA;;;<current user>)(A;;GA;;;S-1-15-2-1)
 ```
+
+MXC 的 workload 运行在 AppContainer 中；只授予交互用户的 DACL 会让扩展连接失败
+（`os error 5`）。Unix socket 不受影响。
 
 扩展启动时：
 
@@ -152,7 +155,8 @@ broker 每处理一个请求追加一行 JSON：
 
 ## 6. 安全要求
 
-- socket / 命名管道只允许当前用户访问（Unix 权限 `0600`；Windows 管道 ACL 仅当前用户）。
+- socket / 命名管道只允许当前用户访问（Unix 权限 `0600`；Windows 管道 ACL 为当前用户 +
+  `ALL APPLICATION PACKAGES`，后者仅用于 MXC 容器内的扩展）。
 - broker 必须重新 `realpath` 并校验路径仍在授权范围内；不信任扩展传来的字符串。
 - broker 在每次变更前重新解析路径，Unix 最终组件使用 `O_NOFOLLOW`。
 - broker 持有 launcher 编译后的 `protected` 列表；`approve` 和所有变更操作都先检查它，

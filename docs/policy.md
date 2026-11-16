@@ -42,6 +42,11 @@ protected  >  writable  >  默认只读
 `USERPROFILE`（`HOME` 在 MSYS2 下可能是 `/c/Users/...`，不是合法 Windows 路径），
 `${tmp}` 优先取 `TEMP`/`TMP`。
 
+Windows 后端（MXC）的读范围是**显式白名单**：除了系统默认目录，只暴露 `writable` 根、
+`read_roots`（`--read`、rpi/launcher 目录、agent 目录）以及它们的卷根。未列出的用户目录
+默认不可读；`protected` 通过 `denied_paths` 再扣一层，因此即使 `C:\` 可读，
+`${home}/.ssh` 仍不可读写。
+
 推荐的全局配置：
 
 ```jsonc
