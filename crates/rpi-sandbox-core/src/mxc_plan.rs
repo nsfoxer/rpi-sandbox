@@ -44,6 +44,17 @@ impl MxcPlan {
             if root.as_os_str().is_empty() || !root.is_absolute() {
                 continue;
             }
+            // Read roots only grant read access. A writable root already
+            // grants read, and putting the same path in both lists makes MXC
+            // rank an exact duplicate ambiguously; skip it. The launcher's
+            // directory is often the cwd, so this avoids turning cwd
+            // read-only when `rpis` runs from the extracted archive.
+            if readwrite
+                .iter()
+                .any(|writable| root == writable || root.starts_with(writable))
+            {
+                continue;
+            }
             push_volume_root(&mut readonly, root);
             push_unique(&mut readonly, root.clone());
         }
@@ -125,18 +136,18 @@ mod tests {
     }
 
     #[test]
-    fn read_roots_are_added_once() {
+    fn read_roots_covered_by_writable_are_skipped() {
         let plan = MxcPlan::build(
             &policy(&[r"C:\work"], &[]),
-            &[PathBuf::from(r"C:\work\agent"), PathBuf::from(r"C:\work")],
+            &[
+                PathBuf::from(r"C:\work\agent"),
+                PathBuf::from(r"C:\work"),
+                PathBuf::from(r"C:\agent"),
+            ],
         );
         let mut got = plan.readonly.clone();
         got.sort();
-        let mut want = vec![
-            PathBuf::from(r"C:\"),
-            PathBuf::from(r"C:\work"),
-            PathBuf::from(r"C:\work\agent"),
-        ];
+        let mut want = vec![PathBuf::from(r"C:\"), PathBuf::from(r"C:\agent")];
         want.sort();
         assert_eq!(got, want);
     }

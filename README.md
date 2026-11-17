@@ -10,6 +10,29 @@ Linux 用 Landlock，Windows 用 Microsoft Execution Containers (MXC)，macOS �
 
 ## 安装
 
+### 从 release 安装
+
+下载对应平台的压缩包：
+
+```text
+rpi-sandbox-v0.1.0-x86_64-windows.zip
+rpi-sandbox-v0.1.0-x86_64-linux.tar.gz
+```
+
+把 `rpis` 放到 `rpi` 同目录（或 PATH），插件放到 agent 的 `extensions/`：
+
+```text
+<bin>/rpis.exe + rpi.exe
+~/.rpi/agent/extensions/rpi_sandbox_extension.dll
+
+<bin>/rpis + rpi
+~/.rpi/agent/extensions/librpi_sandbox_extension.so
+```
+
+Linux 的 `rpis` 是静态 musl，不依赖 glibc；插件是 glibc，跟随 rpi 宿主。
+
+### 从源码安装
+
 ```bash
 cargo build --release -p rpi-sandbox-launcher -p rpi-sandbox-extension
 ```
