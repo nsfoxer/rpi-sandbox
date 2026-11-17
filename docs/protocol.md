@@ -19,6 +19,7 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `RPI_SANDBOX_POLICY` | launcher 编译后的策略快照（JSON 文件）。扩展优先读取它，避免与内核边界漂移 |
 | `RPI_SANDBOX_WRITABLE` | 换行分隔的 `--write` 路径（仅隔离时设置） |
 | `RPI_SANDBOX_READONLY` | 换行分隔的 `--readonly` 路径（仅隔离时设置） |
+| `RPI_SANDBOX_PARTIAL=1` | 边界已建立，但某个 `readonly` 规则无法被内核强制；扩展显示 `partial`，不宣称完整隔离 |
 
 命名管道的 DACL 授予当前用户与 `ALL APPLICATION PACKAGES`（`S-1-15-2-1`）：
 

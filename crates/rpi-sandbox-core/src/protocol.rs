@@ -34,14 +34,18 @@ pub mod env {
     pub const WRITABLE: &str = "RPI_SANDBOX_WRITABLE";
     /// Newline-separated `--readonly` paths from the launcher.
     pub const READONLY: &str = "RPI_SANDBOX_READONLY";
+    /// `1` when the kernel boundary is active but a `readonly` rule cannot be
+    /// enforced by the backend (for example Linux Landlock cannot subtract a
+    /// nested read-only subtree).
+    pub const PARTIAL: &str = "RPI_SANDBOX_PARTIAL";
     /// Path of the launcher's compiled policy snapshot (JSON).
     ///
     /// The extension prefers this file over re-compiling configuration, so the
     /// kernel boundary and the tool gating can never disagree.
     pub const POLICY: &str = "RPI_SANDBOX_POLICY";
     /// Every variable above, for wholesale removal before re-applying them.
-    pub const ALL: [&str; 8] = [
-        ACTIVE, SOCKET, PROFILE, VERSION, CONFIG, WRITABLE, READONLY, POLICY,
+    pub const ALL: [&str; 9] = [
+        ACTIVE, SOCKET, PROFILE, VERSION, CONFIG, WRITABLE, READONLY, PARTIAL, POLICY,
     ];
 }
 

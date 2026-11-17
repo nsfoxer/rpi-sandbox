@@ -39,8 +39,11 @@ sandbox\agent\      RPI_CODING_AGENT_DIR（只读；launcher 预创建 .resource
 sandbox\work\       cwd
 ```
 
-MXC 要求 Windows 11 24H2 build 26100.9278+。不支持时 `auto` 模式降级为不隔离，
-`required` 拒绝启动。
+MXC 要求 Windows 11 24H2 build 26100.9278+。`rpis` 默认 `required`：后端不可用时拒绝启动；
+只有显式 `--mode auto` 才降级并打印警告。
+
+Linux 上嵌套的 `readonly` 无法由 Landlock 扣除：`required` 拒绝启动，`auto` 继续但状态
+显示 `partial`，不宣称完整隔离。
 
 ## 配置
 

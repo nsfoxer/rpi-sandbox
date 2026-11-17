@@ -119,8 +119,8 @@ Landlock 的文件规则绑定**已存在的 inode**，所以 launcher 会在应
 
 | 字段 | 默认 |
 |---|---|
-| `enabled` | `false`（opt-in；本地实验可通过配置开启） |
-| `mode` | `auto` |
+| `enabled` | `false`（配置默认；运行 `rpis` 本身即 opt-in） |
+| `mode` | 配置默认 `auto`；`rpis` 在未配置时默认 `required` |
 | `approval.enabled` | `true`（在沙箱启用时） |
 | `approval.defaultScope` | `session` |
 | `auditLog` | 无（不建议关闭） |
@@ -132,7 +132,7 @@ Landlock 的文件规则绑定**已存在的 inode**，所以 launcher 会在应
 | 平台 | 行为 |
 |---|---|
 | Windows（MXC） | 映射为 `readonly_paths`。MXC 按「更具体的路径优先」，因此可写父目录中的 readonly 子目录**可读、不可写**（新建、修改、删除都被拒）。已实测：`git commit` 能正常读取 `.git/hooks`。 |
-| Linux（Landlock） | Landlock 只能累加权限，不能扣除子树。`readonly` 只由扩展工具层和 broker 拦截；`bash` 仍可写。**启动会警告（不拒绝）**，因为内核层没有完整实现。 |
+| Linux（Landlock） | Landlock 只能累加权限，不能扣除子树。`readonly` 只由扩展工具层和 broker 拦截；`bash` 仍可写。**`required` 拒绝启动**；`auto` 继续但状态显示 `partial`，不再宣称完整隔离。 |
 
 其他规则：
 

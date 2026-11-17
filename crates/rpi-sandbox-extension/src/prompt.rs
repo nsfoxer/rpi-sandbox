@@ -48,11 +48,22 @@ with `read` instead of retrying.";
 const ENV_NOTICE: &str =
     "`RPI_SANDBOX_ACTIVE=1` in the environment confirms the sandbox; no other probe is needed.";
 
+/// What a partial backend means for direct shell writes.
+const PARTIAL_NOTICE: &str = "\
+This backend cannot subtract a nested read-only path from a writable root.
+Direct `bash` writes to those paths may still succeed; only `write`/`edit` and
+broker writes are denied. The status reports `partial`, not full isolation.";
+
 /// Render the block appended to the run's system prompt.
 ///
 /// Readonly paths are only counted: naming them would put secret locations
 /// into the prompt, and `/sandbox` already shows the list to the user.
-pub fn render(policy: &SandboxPolicy, isolated: bool, backend: Option<&str>) -> String {
+pub fn render(
+    policy: &SandboxPolicy,
+    isolated: bool,
+    partial: bool,
+    backend: Option<&str>,
+) -> String {
     if !isolated {
         return format!(
             "{MARKER}\n\nThe rpi-sandbox extension is loaded, but this process is **not** \
@@ -66,7 +77,12 @@ pub fn render(policy: &SandboxPolicy, isolated: bool, backend: Option<&str>) -> 
     if let Some(backend) = backend.map(str::trim).filter(|value| !value.is_empty()) {
         out.push_str(&format!(" ({backend})"));
     }
-    out.push_str(".\n\nWritable roots:\n");
+    out.push_str(".\n\n");
+    if partial {
+        out.push_str(PARTIAL_NOTICE);
+        out.push_str("\n\n");
+    }
+    out.push_str("Writable roots:\n");
 
     if policy.writable.is_empty() {
         out.push_str("- (none)\n");
@@ -145,7 +161,12 @@ mod tests {
 
     #[test]
     fn isolated_block_names_roots_and_denial() {
-        let text = render(&policy(&["/work/project"], &[]), true, Some("landlock"));
+        let text = render(
+            &policy(&["/work/project"], &[]),
+            true,
+            false,
+            Some("landlock"),
+        );
         assert!(text.starts_with(MARKER));
         assert!(text.contains("landlock"));
         assert!(text.contains("- /work/project"));
@@ -163,6 +184,7 @@ mod tests {
         let text = render(
             &policy(&["/work"], &["/home/user/.ssh", "/work/.env"]),
             true,
+            false,
             None,
         );
         assert!(text.contains("2 read-only paths are"));
@@ -174,7 +196,7 @@ mod tests {
     fn roots_are_truncated() {
         let roots: Vec<String> = (0..14).map(|index| format!("/work/{index}")).collect();
         let refs: Vec<&str> = roots.iter().map(String::as_str).collect();
-        let text = render(&policy(&refs, &[]), true, None);
+        let text = render(&policy(&refs, &[]), true, false, None);
         assert!(text.contains("- /work/0"));
         assert!(text.contains("- /work/11"));
         assert!(!text.contains("- /work/12"));
@@ -183,7 +205,7 @@ mod tests {
 
     #[test]
     fn empty_writable_list_is_explicit() {
-        let text = render(&policy(&[], &[]), true, None);
+        let text = render(&policy(&[], &[]), true, false, None);
         assert!(text.contains("Writable roots:\n- (none)"));
     }
 
@@ -194,14 +216,14 @@ mod tests {
             enabled: Some(false),
             ..ApprovalSettings::default()
         };
-        let text = render(&policy, true, None);
+        let text = render(&policy, true, false, None);
         assert!(text.contains("Approvals are disabled"));
         assert!(!text.contains("can ask\nthe user"));
     }
 
     #[test]
     fn not_isolated_block_is_honest() {
-        let text = render(&policy(&["/work"], &[]), false, None);
+        let text = render(&policy(&["/work"], &[]), false, false, None);
         assert!(text.contains("**not** isolated"));
         assert!(text.contains("`bash` is unconstrained"));
         assert!(text.contains("rpis"));
@@ -210,7 +232,7 @@ mod tests {
 
     #[test]
     fn append_keeps_the_existing_prompt() {
-        let block = render(&policy(&["/work"], &[]), true, None);
+        let block = render(&policy(&["/work"], &[]), true, false, None);
         let merged = append_once("You are rpi.\n\nBe careful.", &block).unwrap();
         assert!(merged.starts_with("You are rpi.\n\nBe careful.\n\n## Sandbox"));
         assert!(merged.contains("- /work"));
@@ -218,7 +240,7 @@ mod tests {
 
     #[test]
     fn append_is_idempotent() {
-        let block = render(&policy(&["/work"], &[]), true, None);
+        let block = render(&policy(&["/work"], &[]), true, false, None);
         let merged = append_once("You are rpi.", &block).unwrap();
         assert!(append_once(&merged, &block).is_none());
     }

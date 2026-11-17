@@ -105,7 +105,12 @@ rpi_plugin_sdk::export_plugin!(|api| {
         }
     }
 
-    let prompt_block = prompt::render(&config.policy, config.isolated, backend.as_deref());
+    let prompt_block = prompt::render(
+        &config.policy,
+        config.isolated,
+        config.partial,
+        backend.as_deref(),
+    );
     let prompt_hint = register_prompt(&api);
     let _ = STATE.set(State {
         config,
@@ -441,7 +446,7 @@ mod tests {
 
     #[test]
     fn prompt_patch_appends_to_the_host_prompt() {
-        let block = prompt::render(&policy("/work"), true, Some("landlock"));
+        let block = prompt::render(&policy("/work"), true, false, Some("landlock"));
         let envelope = serde_json::json!({
             "prompt": "hello",
             "systemPrompt": "You are rpi."
@@ -457,7 +462,7 @@ mod tests {
 
     #[test]
     fn prompt_patch_declines_without_an_existing_prompt() {
-        let block = prompt::render(&policy("/work"), true, None);
+        let block = prompt::render(&policy("/work"), true, false, None);
         assert!(prompt_patch("{}", &block).is_none());
         assert!(prompt_patch(r#"{"systemPrompt": ""}"#, &block).is_none());
         assert!(prompt_patch(r#"{"systemPrompt": 42}"#, &block).is_none());
@@ -466,7 +471,7 @@ mod tests {
 
     #[test]
     fn prompt_patch_is_idempotent() {
-        let block = prompt::render(&policy("/work"), true, None);
+        let block = prompt::render(&policy("/work"), true, false, None);
         let first = prompt_patch(
             &serde_json::json!({"systemPrompt": "You are rpi."}).to_string(),
             &block,

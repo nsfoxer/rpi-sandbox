@@ -14,7 +14,8 @@ use rpi_sandbox_core::protocol::env;
 use rpi_sandbox_core::state::policy_snapshot_path;
 use rpi_sandbox_core::{
     compile_policy, load_settings_file, normalize_and_resolve, BrokerConfig, PathRule,
-    PolicyContext, PolicyOverrides, SandboxMode, SandboxPolicy, SandboxSupport, PROTOCOL_VERSION,
+    PolicyContext, PolicyOverrides, ReadOnlyGap, SandboxMode, SandboxPolicy, SandboxSettings,
+    SandboxSupport, PROTOCOL_VERSION,
 };
 
 use crate::args::{maintenance_bypass, Args};
@@ -24,6 +25,10 @@ use crate::args::{maintenance_bypass, Args};
 pub enum Startup {
     /// Apply the backend, start the broker, and launch confined.
     Isolate,
+    /// Apply the backend, but a `readonly` rule cannot be enforced by the
+    /// kernel; the extension reports `partial` instead of claiming full
+    /// isolation.
+    Partial(String),
     /// Launch without a sandbox, printing `reason`.
     Unconfined(String),
 }
@@ -54,7 +59,7 @@ pub fn run(args: Args) -> Result<i32, String> {
         eprintln!("sandbox: bypassed ({reason})");
     }
 
-    let isolate = startup == Startup::Isolate;
+    let isolate = matches!(startup, Startup::Isolate | Startup::Partial(_));
     let backend: &dyn SandboxBackend = if isolate {
         platform_backend()
     } else {
@@ -86,6 +91,9 @@ pub fn run(args: Args) -> Result<i32, String> {
         sandbox_env.set(env::ACTIVE, "1");
         sandbox_env.set(env::VERSION, PROTOCOL_VERSION.to_string());
         sandbox_env.set(env::PROFILE, args.profile.as_str());
+        if matches!(startup, Startup::Partial(_)) {
+            sandbox_env.set(env::PARTIAL, "1");
+        }
         if !args.writable.is_empty() {
             sandbox_env.set(env::WRITABLE, args.writable.join("\n"));
         }
@@ -149,16 +157,43 @@ pub fn startup_action(
     if !policy.enabled || policy.mode == SandboxMode::Off {
         return Ok(Startup::Unconfined("disabled".to_string()));
     }
-    // Warn when this backend cannot enforce `readonly` in the kernel.
-    // Windows MXC maps it to a read-only subpath; Linux Landlock cannot
-    // subtract a subtree, so only the tool layer and broker stop writes.
-    for gap in policy.protection_gaps() {
-        if gap.blocks_enforcement(capabilities) {
-            eprintln!("warning: sandbox: {}", gap.describe());
-        }
+    // Warn about every gap the kernel cannot enforce. A nested read-only path
+    // on an additive backend (Landlock) is the one that changes the startup
+    // decision: `required` refuses, `auto` continues but is reported as
+    // `partial` rather than claiming full isolation.
+    let gaps: Vec<ReadOnlyGap> = policy
+        .protection_gaps()
+        .into_iter()
+        .filter(|gap| gap.blocks_enforcement(capabilities))
+        .collect();
+    let nested = gaps
+        .iter()
+        .any(|gap| matches!(gap, ReadOnlyGap::ReadOnlyInsideWritable { .. }));
+
+    if policy.mode == SandboxMode::Required && nested {
+        let gap = gaps
+            .iter()
+            .find(|gap| matches!(gap, ReadOnlyGap::ReadOnlyInsideWritable { .. }))
+            .expect("nested gap was just found");
+        return Err(format!(
+            "sandbox is required but cannot enforce a read-only path: {}",
+            gap.describe()
+        ));
     }
+    for gap in &gaps {
+        eprintln!("warning: sandbox: {}", gap.describe());
+    }
+
     match support {
-        SandboxSupport::Supported(_) => Ok(Startup::Isolate),
+        SandboxSupport::Supported(_) => {
+            if nested {
+                Ok(Startup::Partial(
+                    "read-only rules are not enforced by the kernel".to_string(),
+                ))
+            } else {
+                Ok(Startup::Isolate)
+            }
+        }
         SandboxSupport::Unsupported { reason } => {
             if policy.mode == SandboxMode::Required {
                 Err(format!(
@@ -371,7 +406,7 @@ pub fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<Pa
 
     let overrides = PolicyOverrides {
         enabled: Some(enabled),
-        mode: args.mode,
+        mode: Some(resolve_mode(args, global.as_ref())),
         writable: args.writable.clone(),
         readonly: args.readonly.clone(),
         allow_file_writes: Vec::new(),
@@ -426,6 +461,16 @@ fn force_bookkeeping_file_rules(policy: &mut SandboxPolicy, agent: Option<&Path>
             *rule = PathRule::File(path);
         }
     }
+}
+
+/// Effective failure mode: CLI, then the global config, then `required`.
+///
+/// Running the launcher is the explicit opt-in, so a missing backend refuses to
+/// start unless the user asked for `auto`.
+fn resolve_mode(args: &Args, global: Option<&SandboxSettings>) -> SandboxMode {
+    args.mode
+        .or_else(|| global.and_then(|settings| settings.mode))
+        .unwrap_or(SandboxMode::Required)
 }
 
 /// Effective session directory before the built-in default is applied.
@@ -706,15 +751,32 @@ mod tests {
     }
 
     #[test]
-    fn required_accepts_nested_protection() {
+    fn required_refuses_nested_readonly_without_subtract() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join(".ssh");
+        std::fs::create_dir(&secrets).unwrap();
         let mut restricted = policy(true, SandboxMode::Required);
-        restricted.writable = vec![PathRule::Dir(PathBuf::from("/tmp"))];
-        restricted.readonly = vec![PathRule::Dir(PathBuf::from("/tmp/.ssh"))];
+        restricted.writable = vec![PathRule::Dir(dir.path().to_path_buf())];
+        restricted.readonly = vec![PathRule::Dir(secrets)];
         let support = SandboxSupport::Supported(BackendKind::Landlock { abi: 6 });
-        assert_eq!(
+        let error = startup_action(&restricted, caps(), &support).unwrap_err();
+        assert!(error.contains("required"), "{error}");
+        assert!(error.contains("read-only"), "{error}");
+    }
+
+    #[test]
+    fn auto_marks_nested_readonly_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join(".ssh");
+        std::fs::create_dir(&secrets).unwrap();
+        let mut restricted = policy(true, SandboxMode::Auto);
+        restricted.writable = vec![PathRule::Dir(dir.path().to_path_buf())];
+        restricted.readonly = vec![PathRule::Dir(secrets)];
+        let support = SandboxSupport::Supported(BackendKind::Landlock { abi: 6 });
+        assert!(matches!(
             startup_action(&restricted, caps(), &support).unwrap(),
-            Startup::Isolate
-        );
+            Startup::Partial(_)
+        ));
     }
 
     #[test]
@@ -936,5 +998,24 @@ mod tests {
             matches!(&snapshot.writable[2], PathRule::Dir(_)),
             "ordinary writable roots stay directories"
         );
+    }
+
+    #[test]
+    fn the_launcher_defaults_to_required() {
+        let args = Args::default();
+        assert_eq!(resolve_mode(&args, None), SandboxMode::Required);
+    }
+
+    #[test]
+    fn explicit_modes_win_over_the_required_default() {
+        let global = SandboxSettings {
+            mode: Some(SandboxMode::Off),
+            ..SandboxSettings::default()
+        };
+        let mut args = Args::default();
+        args.mode = Some(SandboxMode::Auto);
+        assert_eq!(resolve_mode(&args, Some(&global)), SandboxMode::Auto);
+        args.mode = None;
+        assert_eq!(resolve_mode(&args, Some(&global)), SandboxMode::Off);
     }
 }

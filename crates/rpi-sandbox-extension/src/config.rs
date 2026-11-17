@@ -18,6 +18,9 @@ use rpi_sandbox_core::{
 pub struct Config {
     /// Whether the launcher established the kernel boundary.
     pub isolated: bool,
+    /// Whether the kernel boundary is active but a `readonly` rule is not
+    /// enforced (for example a nested Landlock rule).
+    pub partial: bool,
     /// Broker socket path (Unix) or named pipe (Windows).
     pub socket: Option<PathBuf>,
     /// Profile label.
@@ -40,6 +43,10 @@ impl Config {
         let isolated = std::env::var(protocol_env::ACTIVE)
             .map(|value| value.trim() == "1")
             .unwrap_or(false);
+        let partial = isolated
+            && std::env::var(protocol_env::PARTIAL)
+                .map(|value| value.trim() == "1")
+                .unwrap_or(false);
         let socket = std::env::var_os(protocol_env::SOCKET).map(PathBuf::from);
         let profile =
             std::env::var(protocol_env::PROFILE).unwrap_or_else(|_| "default".to_string());
@@ -84,6 +91,7 @@ impl Config {
         };
         Self {
             isolated,
+            partial,
             socket,
             profile,
             config_path,
@@ -94,10 +102,13 @@ impl Config {
 
     /// Human-readable status used by `SetStatus` and `/sandbox`.
     pub fn status_label(&self) -> String {
-        if self.isolated {
-            format!("🔒 sandbox ({})", self.profile)
+        if !self.isolated {
+            return "🔓 not isolated".to_string();
+        }
+        if self.partial {
+            format!("🟡 sandbox partial ({})", self.profile)
         } else {
-            "🔓 not isolated".to_string()
+            format!("🔒 sandbox ({})", self.profile)
         }
     }
 
@@ -105,10 +116,12 @@ impl Config {
     pub fn describe(&self) -> String {
         let mut out = format!(
             "sandbox: {}\nprofile: {}\nbroker: {}",
-            if self.isolated {
-                "isolated (launcher)"
-            } else {
+            if !self.isolated {
                 "NOT isolated — run rpi through rpi-sandbox"
+            } else if self.partial {
+                "isolated (launcher, partial: read-only not enforced by the kernel)"
+            } else {
+                "isolated (launcher)"
             },
             self.profile,
             self.socket
@@ -313,6 +326,7 @@ mod tests {
         };
         let config = Config {
             isolated: true,
+            partial: false,
             socket: None,
             profile: "default".to_string(),
             config_path: Some(dir.path().join("missing.json")),
@@ -328,6 +342,7 @@ mod tests {
     fn status_labels_are_honest_about_isolation() {
         let isolated = Config {
             isolated: true,
+            partial: false,
             socket: None,
             profile: "work".to_string(),
             config_path: None,
@@ -336,6 +351,13 @@ mod tests {
         };
         assert!(isolated.status_label().contains("🔒"));
         assert!(isolated.describe().contains("isolated (launcher)"));
+
+        let partial = Config {
+            partial: true,
+            ..isolated.clone()
+        };
+        assert!(partial.status_label().contains("partial"));
+        assert!(partial.describe().contains("read-only not enforced"));
 
         let plain = Config {
             isolated: false,
