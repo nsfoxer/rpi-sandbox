@@ -780,6 +780,20 @@ mod tests {
     }
 
     #[test]
+    fn required_allows_a_missing_readonly_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-created-yet");
+        let mut restricted = policy(true, SandboxMode::Required);
+        restricted.writable = vec![PathRule::Dir(dir.path().to_path_buf())];
+        restricted.readonly = vec![PathRule::Dir(missing)];
+        let support = SandboxSupport::Supported(BackendKind::Landlock { abi: 6 });
+        assert_eq!(
+            startup_action(&restricted, caps(), &support).unwrap(),
+            Startup::Isolate
+        );
+    }
+
+    #[test]
     fn a_backend_that_can_subtract_readonly_accepts_nested_protection() {
         let dir = tempfile::tempdir().unwrap();
         let secret = dir.path().join(".ssh");

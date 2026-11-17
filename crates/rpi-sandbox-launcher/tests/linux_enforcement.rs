@@ -15,6 +15,10 @@ fn launcher() -> &'static str {
     env!("CARGO_BIN_EXE_rpis")
 }
 
+fn probe() -> &'static str {
+    env!("CARGO_BIN_EXE_rpi-sandbox-probe")
+}
+
 fn landlock_available() -> bool {
     rpi_sandbox_core::probe().is_supported()
 }
@@ -275,4 +279,52 @@ fn cli_paths_are_exported_to_the_extension() {
 fn exit_codes_are_propagated() {
     let output = run_shell(&[], "exit 7");
     assert_eq!(output.status.code(), Some(7));
+}
+
+#[test]
+fn runtime_bookkeeping_files_and_session_dir_are_writable() {
+    if !landlock_available() {
+        eprintln!("landlock unavailable; skipping");
+        return;
+    }
+    let Some(base) = DeniedDir::new() else {
+        eprintln!("/var/tmp unavailable; skipping");
+        return;
+    };
+    let agent = base.path().join("agent");
+    let session = base.path().join("sessions");
+    let lease = agent.join(".resource-lease");
+    let session_file = session.join("note.txt");
+
+    let write = |target: &Path, content: &str| {
+        Command::new(launcher())
+            .env("RPI_CODING_AGENT_DIR", &agent)
+            .arg("--no-extension")
+            .arg("--rpi")
+            .arg(probe())
+            .arg("--")
+            .arg("write")
+            .arg(target)
+            .arg(content)
+            .arg("--session-dir")
+            .arg(&session)
+            .output()
+            .expect("spawn the launcher")
+    };
+
+    let output = write(&lease, "lease");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&lease).unwrap(), "lease");
+
+    let output = write(&session_file, "session");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&session_file).unwrap(), "session");
 }

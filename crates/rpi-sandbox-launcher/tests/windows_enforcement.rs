@@ -340,3 +340,34 @@ fn print_plan_names_mxc_without_creating_any_container() {
         "--print-plan must not touch the filesystem"
     );
 }
+
+#[test]
+fn runtime_bookkeeping_files_and_session_dir_are_writable() {
+    if skip() {
+        return;
+    }
+    let layout = Layout::new();
+    let lease = layout.agent().join(".resource-lease");
+    let session = layout.root.join("sessions");
+    let session_file = session.join("note.txt");
+
+    let output = layout.run(&[
+        "write",
+        lease.to_str().unwrap(),
+        "lease",
+        "--session-dir",
+        session.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(std::fs::read_to_string(&lease).unwrap(), "lease");
+
+    let output = layout.run(&[
+        "write",
+        session_file.to_str().unwrap(),
+        "session",
+        "--session-dir",
+        session.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(std::fs::read_to_string(&session_file).unwrap(), "session");
+}

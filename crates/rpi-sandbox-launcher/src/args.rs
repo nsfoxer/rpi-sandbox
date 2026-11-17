@@ -28,7 +28,7 @@ Options:
   --write <dir>        Extra writable directory (repeatable)
   --readonly <path>    Keep a path read-only inside writable roots (repeatable)
   --read <dir>         Extra read root (Windows only; repeatable)
-  --mode <mode>        auto | required | off
+  --mode <mode>        auto | required | off (default: required)
   --audit <path>       Broker audit log
   --no-broker          Do not start the approval broker
   --no-sandbox         Run without isolation (explicit bypass)
@@ -43,8 +43,10 @@ Examples:
   rpis --write /srv/data -- rpi --resume
   rpis -- --help
 
-The sandbox is opt-in: invoking rpis is the explicit request. Set
-RPI_SANDBOX=0 or pass --no-sandbox to bypass it for one run.";
+The sandbox is opt-in: invoking rpis is the explicit request. The default
+failure mode is `required`; use `--mode auto` (or `\"mode\": \"auto\"` in the
+config) to allow degrading when the backend is unavailable. Pass --no-sandbox
+or set RPI_SANDBOX=0 to bypass it for one run.";
 
 /// Subcommands that legitimately write outside the workspace.
 pub const MAINTENANCE: [&str; 12] = [
