@@ -27,6 +27,7 @@ pub mod path;
 pub mod policy;
 pub mod probe;
 pub mod protocol;
+pub mod safe_fs;
 pub mod state;
 pub mod transport;
 

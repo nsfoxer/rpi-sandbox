@@ -165,12 +165,16 @@ broker 每处理一个请求追加一行 JSON：
 - **已知边界**：同进程的恶意插件与扩展共享 PID，仍处于 TCB 内；要防它需要 broker
   在沙箱外直接向用户展示审批 UI，v1 不做。
 - broker 必须重新 `realpath` 并校验路径仍在授权范围内；不信任扩展传来的字符串。
-- broker 在每次变更前重新解析路径，Unix 最终组件使用 `O_NOFOLLOW`。
+- broker 在每次变更前重新解析路径，所有变更操作统一经过 `core::safe_fs`：
+  - Unix 逐级 `openat(O_NOFOLLOW)` 打开父目录，再用 `openat` / `unlinkat` / `renameat`
+    相对该目录操作；父目录在检查后被替换为 symlink 时返回 `ELOOP`/`ENOTDIR`，不会被跟随。
+  - Windows 打开文件/父目录句柄后校验最终路径与 `FILE_ATTRIBUTE_REPARSE_POINT`；
+    rename 前校验两侧父目录。MXC 仍是 Windows 的主写边界。
+- `write` 的 `Create` 使用 `O_EXCL`，`Overwrite` 不带 `O_CREAT`；文件在
+  `exists()` 与打开之间出现/消失不会把一个批准降级成另一种写操作。
 - broker 持有 launcher 编译后的 `readonly` 列表；`approve` 和所有变更操作都先检查它，
   授权不能覆盖。
 - 扩展在弹窗前先做一次 readonly 判定，减少无效询问；broker 是最终裁决者。
-- **已知限制**：父目录在校验与写入之间被替换为软链的竞态尚未消除，需要
-  `openat2(RESOLVE_BENEATH)` 或平台等价机制（见 roadmap Phase 5）。
 - broker 不解析模型输出，只接受结构化路径 + 操作。
 - 扩展的授权决定来自前端（TUI/RPC/ACP），不由模型文本直接触发。
 

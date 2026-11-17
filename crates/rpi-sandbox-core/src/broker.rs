@@ -11,14 +11,13 @@
 //! Protocol: one JSON object per line over a Unix stream socket (see
 //! [`crate::protocol`]).
 //!
-//! Known limitation: the broker re-resolves paths before mutating, and applies
-//! `O_NOFOLLOW` to the final component on Unix, but a parent directory swapped
-//! for a symlink between the check and the write can still redirect the
-//! operation. Closing that race requires `openat2(RESOLVE_BENEATH)` or
-//! equivalent platform APIs and is tracked as a hardening task.
+//! Path safety: every mutation goes through [`crate::safe_fs`], which opens the
+//! parent directory one component at a time with `O_NOFOLLOW` (Unix) or keeps
+//! the file/parent handles open while verifying the final path (Windows). A
+//! symlink swapped in after the policy check makes the operation fail instead
+//! of redirecting it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -32,6 +31,7 @@ use crate::protocol::{
     read_frame, BrokerError, ErrorCode, Frame, Operation, Request, Response, DEFAULT_MAX_PAYLOAD,
     OPERATION_NAMES, PROTOCOL_VERSION,
 };
+use crate::safe_fs;
 
 /// Where the broker appends one JSON line per handled request.
 #[derive(Clone, Debug)]
@@ -425,31 +425,31 @@ fn dispatch(
                 WriteOp::Create
             };
             let scope = authorize(store, &lexical, &resolved, write_op)?;
-            write_file(&resolved, &bytes, append)?;
+            // `exists()` only selects the approval. The open flags enforce the
+            // same mode atomically: `O_EXCL` for Create, and `O_TRUNC` without
+            // `O_CREAT` for Overwrite. A file that appears or disappears in
+            // between cannot downgrade the approval into an overwrite.
+            let mode = match write_op {
+                WriteOp::Create => safe_fs::WriteMode::Create,
+                WriteOp::Overwrite => safe_fs::WriteMode::Overwrite,
+                WriteOp::Append => safe_fs::WriteMode::Append,
+                _ => unreachable!("write operation mode"),
+            };
+            safe_fs::write(&resolved, &bytes, mode).map_err(io_error)?;
             Ok(Some(scope))
         }
         Operation::Truncate { path, len } => {
             let (lexical, resolved) = parse_request_path(&path)?;
             reject_readonly(config, &resolved, "truncate")?;
             let scope = authorize(store, &lexical, &resolved, WriteOp::Overwrite)?;
-            revalidate(&resolved, &lexical)?;
-            let mut options = OpenOptions::new();
-            options.write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NOFOLLOW);
-            }
-            let file = options.open(&resolved).map_err(io_error)?;
-            file.set_len(len).map_err(io_error)?;
+            safe_fs::truncate(&resolved, len).map_err(io_error)?;
             Ok(Some(scope))
         }
         Operation::Delete { path } => {
             let (lexical, resolved) = parse_request_path(&path)?;
             reject_readonly(config, &resolved, "delete")?;
             let scope = authorize(store, &lexical, &resolved, WriteOp::Delete)?;
-            revalidate(&resolved, &lexical)?;
-            std::fs::remove_file(&resolved).map_err(io_error)?;
+            safe_fs::remove_file(&resolved).map_err(io_error)?;
             Ok(Some(scope))
         }
         Operation::Rename { path, target } => {
@@ -459,22 +459,14 @@ fn dispatch(
             reject_readonly(config, &destination, "rename")?;
             let source_scope = authorize(store, &source_lexical, &source, WriteOp::Rename)?;
             authorize(store, &target_lexical, &destination, WriteOp::Create)?;
-            revalidate(&source, &source_lexical)?;
-            revalidate(&destination, &target_lexical)?;
-            if let Some(parent) = destination.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent).map_err(io_error)?;
-                }
-            }
-            std::fs::rename(&source, &destination).map_err(io_error)?;
+            safe_fs::rename(&source, &destination).map_err(io_error)?;
             Ok(Some(source_scope))
         }
         Operation::Mkdir { path } => {
             let (lexical, resolved) = parse_request_path(&path)?;
             reject_readonly(config, &resolved, "mkdir")?;
             let scope = authorize(store, &lexical, &resolved, WriteOp::Mkdir)?;
-            revalidate(&resolved, &lexical)?;
-            std::fs::create_dir_all(&resolved).map_err(io_error)?;
+            safe_fs::create_dir_all(&resolved).map_err(io_error)?;
             Ok(Some(scope))
         }
         Operation::Revoke { path, recursive } => {
@@ -577,49 +569,10 @@ fn not_approved(operation: WriteOp, path: &Path) -> BrokerError {
     )
 }
 
-/// Re-resolve immediately before mutating so a swapped symlink is detected.
-fn revalidate(path: &Path, lexical: &Path) -> Result<(), BrokerError> {
-    if &normalize_and_resolve(path) != path {
-        return Err(BrokerError::new(
-            ErrorCode::UnsafePath,
-            format!(
-                "{} changed while the request was handled",
-                lexical.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn write_file(path: &Path, bytes: &[u8], append: bool) -> Result<(), BrokerError> {
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(io_error)?;
-        }
-    }
-    revalidate(path, path)?;
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if append {
-        options.append(true).create(true);
-    } else {
-        options.truncate(true).create(true);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options.open(path).map_err(io_error)?;
-    file.write_all(bytes).map_err(io_error)?;
-    file.flush().map_err(io_error)?;
-    Ok(())
-}
-
 fn io_error(error: std::io::Error) -> BrokerError {
     let code = match error.raw_os_error() {
         #[cfg(unix)]
-        Some(libc::ELOOP) => ErrorCode::UnsafePath,
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => ErrorCode::UnsafePath,
         // ERROR_ACCESS_DENIED: the active backend refused the write (for
         // example a Windows deny ACE on a readonly path).
         Some(5) => ErrorCode::PermissionDenied,
