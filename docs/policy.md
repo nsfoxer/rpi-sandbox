@@ -99,6 +99,22 @@ readonly 会让沙箱内的 `git commit` 失败，因为 git 需要写 `index` �
 - 运行时簿记文件（如 agent 目录下的 `.resource-lease`、`update-check.json`），以**文件级**
   规则加入；agent 目录本身保持只读，避免模型持久化恶意插件。
 
+Landlock 的文件规则绑定**已存在的 inode**，所以 launcher 会在应用边界之前：
+
+- 预创建 `.resource-lease` 与 `update-check.json`（空文件，`O_EXCL|O_NOFOLLOW`，拒绝 symlink）；
+- 预创建显式指定的会话目录；
+- `--print-plan` 不产生任何磁盘副作用。
+
+`.resource-lease` 和 `update-check.json` 的差异：
+
+- `.resource-lease` 由 host 以 `open(read+write)` + `flock` 使用，空文件即可；
+- `update-check.json` 由 host 通过 `atomic_write` 写入，需要在 agent 目录创建临时文件并
+  `rename`；文件级规则无法授予父目录的 `MAKE_REG`/`REFER`。因此沙箱内更新缓存可能**不持久化**
+  （host 忽略该错误，不中断会话），更新检查本身仍然可用。
+
+`--export` 只读取已完成的会话文件并写出一个结果文件，不运行模型会话；launcher 将其视为
+维护命令，在沙箱外执行。
+
 ## 5. 默认值
 
 | 字段 | 默认 |

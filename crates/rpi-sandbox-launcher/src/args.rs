@@ -174,6 +174,15 @@ pub fn parse_args<I: Iterator<Item = OsString>>(args: I) -> Result<Args, ParseEr
 
 /// Whether the target starts with a maintenance subcommand.
 pub fn maintenance_bypass(target: &[String]) -> Option<&'static str> {
+    // `--export` only reads a finished session file and writes one output; it
+    // never runs a model session, so it stays outside the sandbox like the
+    // other maintenance commands.
+    if target
+        .iter()
+        .any(|arg| arg == "--export" || arg.starts_with("--export="))
+    {
+        return Some("export");
+    }
     // `rpis <subcommand> ...`: maintenance commands are the first rpi argument.
     let first = target.first()?;
     MAINTENANCE
@@ -274,6 +283,22 @@ mod tests {
             maintenance_bypass(&["--local-only".to_string(), "install".to_string()]),
             None,
             "only the first rpi argument selects a subcommand"
+        );
+    }
+
+    #[test]
+    fn export_bypasses_the_sandbox() {
+        assert_eq!(
+            maintenance_bypass(&["--export".to_string(), "session.jsonl".to_string()]),
+            Some("export")
+        );
+        assert_eq!(
+            maintenance_bypass(&["--export=session.jsonl".to_string()]),
+            Some("export")
+        );
+        assert_eq!(
+            maintenance_bypass(&["-p".to_string(), "hi".to_string()]),
+            None
         );
     }
 }

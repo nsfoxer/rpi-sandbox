@@ -34,7 +34,7 @@ Windows 布局：
 
 ```text
 sandbox\bin\        rpis.exe + rpi.exe
-sandbox\agent\      RPI_CODING_AGENT_DIR
+sandbox\agent\      RPI_CODING_AGENT_DIR（只读；launcher 预创建 .resource-lease / update-check.json）
   extensions\       rpi_sandbox_extension.dll   ← 沙箱插件
 sandbox\work\       cwd
 ```

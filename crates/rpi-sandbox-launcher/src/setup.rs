@@ -13,8 +13,8 @@ use rpi_sandbox_core::backend::{
 use rpi_sandbox_core::protocol::env;
 use rpi_sandbox_core::state::policy_snapshot_path;
 use rpi_sandbox_core::{
-    compile_policy, load_settings_file, normalize_and_resolve, BrokerConfig, PolicyContext,
-    PolicyOverrides, SandboxMode, SandboxPolicy, SandboxSupport, PROTOCOL_VERSION,
+    compile_policy, load_settings_file, normalize_and_resolve, BrokerConfig, PathRule,
+    PolicyContext, PolicyOverrides, SandboxMode, SandboxPolicy, SandboxSupport, PROTOCOL_VERSION,
 };
 
 use crate::args::{maintenance_bypass, Args};
@@ -60,6 +60,17 @@ pub fn run(args: Args) -> Result<i32, String> {
     } else {
         &NoneBackend
     };
+
+    // The agent directory stays read-only inside the sandbox, and Landlock/MXC
+    // bind file rules to existing inodes. Create the bookkeeping placeholders
+    // (and an explicitly configured session directory) before compiling the
+    // plan; otherwise the rule is skipped and the sandboxed rpi gets EACCES on
+    // its first write. `--print-plan` stays side-effect free.
+    if isolate && !args.print_plan {
+        let agent = agent_dir();
+        let session_dir = resolve_session_dir(&args, &cwd, agent.as_deref());
+        ensure_runtime_paths(agent.as_deref(), session_dir.as_deref())?;
+    }
 
     let plan = backend.plan(&policy)?;
     if args.print_plan {
@@ -366,13 +377,14 @@ pub fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<Pa
         allow_file_writes: Vec::new(),
     };
 
+    let agent = agent_dir();
     let mut auto_writable = vec![cwd.to_path_buf()];
-    if let Some(session_dir) = env_session_dir(cwd) {
+    if let Some(session_dir) = resolve_session_dir(args, cwd, agent.as_deref()) {
         auto_writable.push(session_dir);
     }
-    if let Some(agent_dir) = agent_dir() {
-        auto_writable.push(agent_dir.join("update-check.json"));
-        auto_writable.push(agent_dir.join(".resource-lease"));
+    if let Some(agent) = &agent {
+        auto_writable.push(agent.join("update-check.json"));
+        auto_writable.push(agent.join(".resource-lease"));
     }
 
     let context = PolicyContext::from_env(cwd.to_path_buf());
@@ -383,16 +395,231 @@ pub fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<Pa
         &context,
         &auto_writable,
     );
+    // `auto_rule` decides File vs Dir by looking at the current filesystem, but
+    // the bookkeeping files may not exist yet (the launcher creates them just
+    // before compiling the backend plan). Force them to file rules: a directory
+    // rule on a regular file makes Landlock reject the whole plan with EINVAL.
+    force_bookkeeping_file_rules(&mut policy, agent.as_deref());
     if let Some(audit) = &args.audit {
         policy.audit_log = Some(resolve_against(audit, cwd));
     }
     Ok((policy, config_path))
 }
 
+/// Force the agent bookkeeping paths to file rules.
+///
+/// `compile_policy` classifies automatic entries from `std::fs::metadata` at
+/// compile time. These two files are created by the launcher after that, so a
+/// missing file would be classified as a directory rule; Landlock then rejects
+/// the rule on the regular file with `EINVAL` and the whole plan fails.
+fn force_bookkeeping_file_rules(policy: &mut SandboxPolicy, agent: Option<&Path>) {
+    let Some(agent) = agent else {
+        return;
+    };
+    let bookkeeping = [
+        normalize_and_resolve(&agent.join("update-check.json")),
+        normalize_and_resolve(&agent.join(".resource-lease")),
+    ];
+    for rule in &mut policy.writable {
+        if bookkeeping.iter().any(|file| rule.path() == file) {
+            let path = rule.path().to_path_buf();
+            *rule = PathRule::File(path);
+        }
+    }
+}
+
+/// Effective session directory before the built-in default is applied.
+///
+/// The host precedence is `--session-dir`, then the global `sessionDir`
+/// setting, then `RPI_CODING_AGENT_SESSION_DIR`, then `<cwd>/.rpi/sessions`.
+/// The default sits under the cwd rule, so only explicit overrides are returned
+/// here.
+fn resolve_session_dir(args: &Args, cwd: &Path, agent: Option<&Path>) -> Option<PathBuf> {
+    session_dir_from_target(&args.target, cwd)
+        .or_else(|| settings_session_dir(agent, cwd))
+        .or_else(|| env_session_dir(cwd))
+}
+
+/// `--session-dir <path>` or `--session-dir=<path>` in the forwarded rpi args.
+///
+/// The launcher stops parsing at the first unknown argument, so the flag may
+/// appear anywhere in `target`. Everything after an explicit `--` is positional
+/// and is not treated as a flag.
+fn session_dir_from_target(target: &[String], cwd: &Path) -> Option<PathBuf> {
+    let mut iter = target.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--session-dir" {
+            return iter
+                .next()
+                .map(|value| resolve_against(Path::new(value), cwd));
+        }
+        if let Some(value) = arg.strip_prefix("--session-dir=") {
+            return Some(resolve_against(Path::new(value), cwd));
+        }
+    }
+    None
+}
+
+/// `sessionDir` from the global settings file, best effort.
+///
+/// The host accepts `//` line comments in `settings.json`, so a strict parse
+/// failure is retried after stripping comments. A malformed or absent file just
+/// yields `None`; the default session directory is under the cwd rule anyway.
+fn settings_session_dir(agent: Option<&Path>, cwd: &Path) -> Option<PathBuf> {
+    let path = agent?.join("settings.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(_) => serde_json::from_str(&strip_line_comments(&text)).ok()?,
+    };
+    let raw = value.get("sessionDir")?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(resolve_against(Path::new(raw), cwd))
+}
+
+/// Remove `//` line comments that are outside a double-quoted string.
+///
+/// Mirrors the host's settings parser so a commented `settings.json` still
+/// yields `sessionDir`.
+fn strip_line_comments(text: &str) -> String {
+    text.lines()
+        .map(|line| match find_line_comment(line) {
+            Some(index) => line[..index].to_string(),
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn find_line_comment(line: &str) -> Option<usize> {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '/' if !in_string && line.as_bytes().get(index + 1) == Some(&b'/') => {
+                return Some(index);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Create the runtime files and directories the policy grants write access to.
+///
+/// Landlock and MXC bind file rules to existing inodes. If a file does not
+/// exist, its rule is skipped, and the sandboxed rpi cannot create it because
+/// the agent directory stays read-only. The launcher runs before the boundary,
+/// so it creates empty placeholders here.
+fn ensure_runtime_paths(agent: Option<&Path>, session_dir: Option<&Path>) -> Result<(), String> {
+    if let Some(agent) = agent {
+        for name in [".resource-lease", "update-check.json"] {
+            ensure_placeholder(&agent.join(name))?;
+        }
+    }
+    if let Some(dir) = session_dir {
+        ensure_directory(dir)?;
+    }
+    Ok(())
+}
+
+/// Create an empty regular file when missing, refusing symlinks and directories.
+fn ensure_placeholder(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_file() {
+                return Ok(());
+            }
+            return Err(format!(
+                "sandbox runtime path {} must be a regular file, not a symlink or directory",
+                path.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect sandbox runtime path {}: {error}",
+                path.display()
+            ))
+        }
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("sandbox runtime path {} has no parent", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        // A concurrent launcher created it between the check and the open.
+        // Accept only a regular file; never follow a symlink that won the race.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+                format!(
+                    "cannot inspect sandbox runtime path {}: {error}",
+                    path.display()
+                )
+            })?;
+            if metadata.file_type().is_file() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "sandbox runtime path {} must be a regular file, not a symlink or directory",
+                    path.display()
+                ))
+            }
+        }
+        Err(error) => Err(format!(
+            "cannot create sandbox runtime path {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// Create a directory (and its parents) before the sandbox is applied.
+fn ensure_directory(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("cannot create {}: {error}", path.display()))?;
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(format!("{} must be a directory", path.display()))
+    }
+}
+
 /// Agent directory (`RPI_CODING_AGENT_DIR`, else `~/.rpi/agent`).
+///
+/// The host rejects relative overrides; the launcher does the same and falls
+/// back to the home default, so an empty or POSIX-style value cannot silently
+/// create `.resource-lease` in the current directory.
 pub fn agent_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("RPI_CODING_AGENT_DIR") {
-        return Some(PathBuf::from(dir));
+        let path = PathBuf::from(dir);
+        if path.is_absolute() {
+            return Some(path);
+        }
     }
     rpi_sandbox_core::home_dir().map(|home| home.join(".rpi/agent"))
 }
@@ -590,5 +817,124 @@ mod tests {
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let decoded: SandboxPolicy = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn session_dir_flag_is_detected_in_forwarded_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let absolute = cwd.join("sessions");
+        let target = vec![
+            "--session-dir".to_string(),
+            absolute.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(
+            session_dir_from_target(&target, cwd),
+            Some(normalize_and_resolve(&absolute))
+        );
+        assert_eq!(
+            session_dir_from_target(&["--session-dir=rel/sessions".to_string()], cwd),
+            Some(normalize_and_resolve(&cwd.join("rel/sessions")))
+        );
+    }
+
+    #[test]
+    fn session_dir_after_double_dash_is_positional() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = vec![
+            "-p".to_string(),
+            "hi".to_string(),
+            "--".to_string(),
+            "--session-dir".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        ];
+        assert_eq!(session_dir_from_target(&target, dir.path()), None);
+    }
+
+    #[test]
+    fn settings_session_dir_accepts_line_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(
+            agent.join("settings.json"),
+            "{\n  // custom storage\n  \"sessionDir\": \"sessions\"\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            settings_session_dir(Some(&agent), dir.path()),
+            Some(normalize_and_resolve(&dir.path().join("sessions")))
+        );
+    }
+
+    #[test]
+    fn build_policy_adds_an_explicit_session_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("sessions");
+        let mut args = Args::default();
+        args.target = vec![
+            "--session-dir".to_string(),
+            session.to_string_lossy().into_owned(),
+        ];
+        let (policy, _) = build_policy(&args, dir.path()).unwrap();
+        assert!(
+            policy
+                .writable
+                .iter()
+                .any(|rule| rule.path() == normalize_and_resolve(&session)),
+            "the forwarded --session-dir must be writable"
+        );
+    }
+
+    #[test]
+    fn runtime_placeholders_are_created_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = dir.path().join(".resource-lease");
+        ensure_placeholder(&lease).unwrap();
+        assert!(lease.is_file());
+        // A second run must accept the existing regular file.
+        ensure_placeholder(&lease).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_placeholders_refuse_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"x").unwrap();
+        let link = dir.path().join(".resource-lease");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = ensure_placeholder(&link).unwrap_err();
+        assert!(error.contains("regular file"), "{error}");
+    }
+
+    #[test]
+    fn runtime_paths_create_agent_files_and_session_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let session = dir.path().join("sessions/nested");
+        ensure_runtime_paths(Some(&agent), Some(&session)).unwrap();
+        assert!(agent.join(".resource-lease").is_file());
+        assert!(agent.join("update-check.json").is_file());
+        assert!(session.is_dir());
+    }
+
+    #[test]
+    fn bookkeeping_paths_become_file_rules_even_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let mut snapshot = SandboxPolicy::default();
+        snapshot.writable = vec![
+            PathRule::Dir(normalize_and_resolve(&agent.join(".resource-lease"))),
+            PathRule::Dir(normalize_and_resolve(&agent.join("update-check.json"))),
+            PathRule::Dir(dir.path().to_path_buf()),
+        ];
+        force_bookkeeping_file_rules(&mut snapshot, Some(&agent));
+        assert!(matches!(&snapshot.writable[0], PathRule::File(_)));
+        assert!(matches!(&snapshot.writable[1], PathRule::File(_)));
+        assert!(
+            matches!(&snapshot.writable[2], PathRule::Dir(_)),
+            "ordinary writable roots stay directories"
+        );
     }
 }
