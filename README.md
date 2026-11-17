@@ -1,74 +1,105 @@
 # rpi-sandbox
 
 为 [rpi](https://github.com/bigfish1913/pi-rust) 提供**整进程文件系统沙箱**：
+Linux 用 Landlock，Windows 用 Microsoft Execution Containers (MXC)，macOS 为 Phase 3（未实现）。
 
-- Linux：Landlock
-- Windows：Microsoft Execution Containers (MXC)
-- macOS：Seatbelt（Phase 3，未实现）
+`rpis` 先建立内核边界，再启动 `rpi`。rpi 本体、插件、`bash` 及其子进程共享同一个
+可写白名单；越权写需要用户授权，由沙箱外的 broker 代执行。
 
-`rpis` 在启动 `rpi` 前建立边界；`rpi` 本体、插件、`bash` 及其子进程都在同一个可写白名单内。
-越权写需要用户授权，由不受限的 broker 代执行。
+> **注意**：`rpi` 不会自动隔离。要沙箱就用 `rpis`。
 
-## 快速开始
-
-```bash
-cargo build --workspace
-./target/debug/rpis
-```
-
-`rpis` 是 `rpi` 的替代入口：
-
-- 按 `--rpi` → `RPI_SANDBOX_RPI` → 同目录 `rpi`/`rpi.exe` → `PATH` 定位；
-- 优先加载 `~/.rpi/agent/extensions` 里的沙箱插件；同目录 DLL 作为 fallback；
-- 其余参数原样转发；与 `rpis` 同名时用 `--` 分隔。
+## 安装
 
 ```bash
-rpis
-rpis -p "总结这个仓库"
-rpis --write /srv/data --resume
-rpis --readonly .git/hooks      # 可读不可写
-rpis --print-plan               # 查看后端计划，不改动磁盘
+cargo build --release -p rpi-sandbox-launcher -p rpi-sandbox-extension
 ```
 
-Windows 布局：
+把两个二进制放在同一目录，插件安装到 agent 的 `extensions/`：
 
 ```text
-sandbox\bin\        rpis.exe + rpi.exe
-sandbox\agent\      RPI_CODING_AGENT_DIR（只读；launcher 预创建 .resource-lease / update-check.json）
-  extensions\       rpi_sandbox_extension.dll   ← 沙箱插件
-sandbox\work\       cwd
+<bin>/
+  rpis.exe / rpis
+  rpi.exe  / rpi
+~/.rpi/agent/extensions/
+  rpi_sandbox_extension.dll      # Windows
+  librpi_sandbox_extension.so    # Linux
 ```
 
-MXC 要求 Windows 11 24H2 build 26100.9278+。`rpis` 默认 `required`：后端不可用时拒绝启动；
-只有显式 `--mode auto` 才降级并打印警告。
+```bash
+# Linux
+mkdir -p ~/.rpi/agent/extensions
+cp target/release/rpis ~/.local/bin/
+cp target/release/librpi_sandbox_extension.so ~/.rpi/agent/extensions/
 
-Linux 上嵌套的 `readonly` 无法由 Landlock 扣除：`required` 拒绝启动，`auto` 继续但状态
-显示 `partial`，不宣称完整隔离。
+# Windows（PowerShell）
+New-Item -ItemType Directory -Force $HOME\.rpi\agent\extensions
+Copy-Item target\release\rpis.exe $env:LOCALAPPDATA\Bin\
+Copy-Item target\release\rpi_sandbox_extension.dll $HOME\.rpi\agent\extensions\
+```
+
+`rpis` 按 `--rpi` → `RPI_SANDBOX_RPI` → 同目录 `rpi` → `PATH` 定位 rpi。
+如果插件未安装，`rpis` 会退回到同目录的扩展 DLL/SO。
+
+## 使用
+
+```bash
+rpis                                  # 交互式
+rpis -p "总结这个仓库"                  # headless
+rpis --resume
+rpis --write /srv/data                # 追加可写目录
+rpis --readonly .git/hooks            # 可读不可写
+rpis --session-dir /srv/sessions      # 自定义会话目录
+rpis --mode auto                      # 后端不可用时降级
+rpis --print-plan                     # 只打印计划，不改动磁盘
+rpis -- --help                        # 其余参数原样转发给 rpi
+```
+
+- **默认 `required`**：后端不可用或无法建立边界时拒绝启动。
+- `--mode auto` 才允许降级；Linux 上无法扣除的嵌套 `readonly` 会显示 `partial`。
+- 越权写用 `write` / `edit` 工具：扩展弹授权，broker 执行。`bash` 不能申请授权，
+  被内核拒绝就是拒绝。
+- `/sandbox` 查看当前策略；`/sandbox revoke <path>` 撤销授权。
 
 ## 配置
 
-`~/.rpi/agent/sandbox.json`（全局）或 `<cwd>/.rpi/sandbox.json`（项目，只能收紧）：
+全局 `~/.rpi/agent/sandbox.json`，项目 `<cwd>/.rpi/sandbox.json`（只能收紧）：
 
 ```json
 {
   "enabled": true,
-  "mode": "auto",
+  "mode": "required",
   "writable": ["${cwd}", "${tmp}"],
-  "readonly": ["${home}/.ssh", "${cwd}/.git/hooks"],
+  "readonly": ["${home}/.ssh", "${home}/.aws"],
   "approval": { "enabled": true, "defaultScope": "session" }
 }
 ```
 
-- Linux：工具层 + broker 拦截，`bash` 可绕过；
-- Windows MXC：内核级只读（可读、不可写）。
+- `readonly` 永远优先于 `writable`。
+- 项目配置不能扩大可写范围，也不能关闭沙箱。
+- 相对路径相对于 `cwd`；支持 `${cwd}`、`${tmp}`、`${home}`。
+- `mode: "auto"` 允许降级；`"off"` 关闭沙箱。
+- Linux 上如果 `readonly` 位于某个 `writable` 根内，`required` 会拒绝启动；把路径移到
+  可写根之外，或用 `"mode": "auto"` 接受 `partial`。
 
-## 平台
+`RPI_CODING_AGENT_DIR` 可重定位 agent 目录。`~/.rpi/agent` 在沙箱内保持只读；launcher
+预创建 `.resource-lease` / `update-check.json`，并按需创建显式 `--session-dir`。
+更新缓存在沙箱内可能不持久化。
+
+## 平台与限制
 
 | 平台 | 后端 | 要求 |
 |---|---|---|
 | Linux | Landlock | 5.13+ |
 | Windows | MXC | Windows 11 24H2 build 26100.9278+ |
-| macOS | Seatbelt | Phase 3 |
+| macOS | Seatbelt | Phase 3，未实现 |
+
+- **Linux 嵌套 `readonly`**：Landlock 只能累加权限，不能扣除子树。`required` 拒绝启动；
+  `auto` 继续但状态显示 `partial`，`bash` 仍可直接写该路径（broker / 工具层会拦截）。
+  把只读路径移到可写根之外，或接受 `partial`。
+- **Windows MXC**：`readonly` 是内核级只读（可读、不可写、不可新建/删除）。
+- **威胁模型**：同进程的第三方插件与扩展共享 PID，仍在 TCB 内；要防它需要 broker 在
+  沙箱外直接展示审批 UI，v1 不做。
+- **macOS**：后端未实现，`rpis` 会直接报错。
 
 ## 文档
 
