@@ -8,11 +8,8 @@
 
 #![cfg(target_os = "windows")]
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-
-use rpi_sandbox_core::{ApprovalScope, BrokerClient, WriteOp};
+use std::process::{Command, Output};
 
 fn launcher() -> &'static str {
     env!("CARGO_BIN_EXE_rpis")
@@ -184,61 +181,50 @@ fn descendants_inherit_the_restriction() {
 }
 
 #[test]
-fn broker_serves_approvals_over_the_named_pipe() {
+fn broker_serves_the_agent_but_rejects_children() {
     if skip() {
         return;
     }
     let layout = Layout::new();
-    let mut child = layout
-        .base()
-        .arg("--no-extension")
-        .arg("--rpi")
-        .arg(probe())
-        .arg("--")
-        .args(["hold", "6000"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn the launcher");
 
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let mut reader = BufReader::new(stdout);
-    let mut endpoint = String::new();
-    reader
-        .read_line(&mut endpoint)
-        .expect("read the broker endpoint");
-    let endpoint = endpoint.trim();
+    // The sandboxed agent itself is the broker's peer: hello must succeed.
+    let hello = layout.run(&["broker-hello"]);
     assert!(
-        endpoint.starts_with(r"\\.\pipe\rpi-sandbox-"),
-        "unexpected endpoint: {endpoint}"
+        hello.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&hello.stderr)
     );
+    let text = stdout(&hello);
+    assert!(text.contains("sandbox=windows-mxc"), "{text}");
+    assert!(text.contains("profile=default"), "{text}");
 
-    let client = BrokerClient::connect(Path::new(endpoint)).expect("connect to the broker");
-    let hello = client.hello("rpi-sandbox-test", "0.1.0").unwrap();
-    assert_eq!(hello.sandbox.as_deref(), Some("windows-mxc"));
-    assert_eq!(hello.profile.as_deref(), Some("default"));
-
+    // The agent can approve and write an out-of-policy path through the broker.
     let outside = layout.deny().join("broker.txt");
-    assert!(!client.is_approved(&outside, WriteOp::Create));
-    client
-        .approve(
-            &outside,
-            &[WriteOp::Create, WriteOp::Overwrite],
-            ApprovalScope::Session,
-            false,
-        )
-        .unwrap();
-    client.write(&outside, b"through the broker").unwrap();
+    let write = layout.run(&[
+        "broker-write",
+        outside.to_str().unwrap(),
+        "through the broker",
+    ]);
+    assert!(
+        write.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&write.stderr)
+    );
     assert_eq!(
         std::fs::read_to_string(&outside).unwrap(),
         "through the broker"
     );
-    client.revoke(&outside, false).unwrap();
-    assert!(!client.is_approved(&outside, WriteOp::Create));
-    drop(client);
 
-    let status = child.wait().unwrap();
-    assert!(status.success(), "launcher exited with {status}");
+    // A child process has a different PID, so the broker must reject it. The
+    // probe returns success only when the child's broker write fails.
+    let rejected = layout.deny().join("child.txt");
+    let child = layout.run(&["spawn-broker-write", rejected.to_str().unwrap(), "child"]);
+    assert!(
+        child.status.success(),
+        "a child was allowed to use the broker; stderr: {}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(!rejected.exists(), "a child wrote through the broker");
 }
 
 #[test]

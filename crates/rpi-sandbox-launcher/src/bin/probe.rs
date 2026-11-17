@@ -9,6 +9,7 @@
 //! rpi-sandbox-probe spawn-write <path> <text> write from a grandchild
 //! rpi-sandbox-probe broker-hello              handshake with the broker
 //! rpi-sandbox-probe broker-write <path> <t>   approve + write through the broker
+//! rpi-sandbox-probe spawn-broker-write <path> <t> expect a child's broker write to fail
 //! rpi-sandbox-probe env <name>                print an environment variable
 //! rpi-sandbox-probe exit <code>               exit with a specific code
 //! ```
@@ -29,6 +30,7 @@ fn main() {
         "spawn-write" => spawn_write(&args),
         "broker-hello" => broker_hello(),
         "broker-write" => broker_write(&args),
+        "spawn-broker-write" => spawn_broker_write(&args),
         "sleep" => sleep(&args),
         "hold" => hold(&args),
         "env" => print_env(&args),
@@ -109,6 +111,29 @@ fn broker_write(args: &[String]) -> Result<(), String> {
     client
         .write(&absolute, content.as_bytes())
         .map_err(|error| format!("write: {error}"))
+}
+
+/// Spawn a child that tries to use the broker, and pass only if it is rejected.
+///
+/// The broker verifies the client PID. The child is a different process, so it
+/// must not be able to record an approval or write through the broker.
+fn spawn_broker_write(args: &[String]) -> Result<(), String> {
+    let path = args
+        .get(1)
+        .ok_or("probe: spawn-broker-write needs a path")?;
+    let content = args.get(2).map(String::as_str).unwrap_or("");
+    let exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
+    let status = std::process::Command::new(exe)
+        .arg("broker-write")
+        .arg(path)
+        .arg(content)
+        .status()
+        .map_err(|error| format!("spawn: {error}"))?;
+    if status.success() {
+        Err("a child process was allowed to use the broker".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 /// Publish the broker endpoint on stdout, then stay alive for `millis`.

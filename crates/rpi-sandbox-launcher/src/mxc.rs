@@ -51,8 +51,11 @@ impl SandboxBackend for MxcBackend {
         // `plan()` has no read roots; rebuild with the launcher's set.
         let plan = MxcPlan::build(&spec.policy, &spec.read_roots);
         // 1. Broker endpoint before the child starts, so the extension can
-        //    connect during library initialization.
+        //    connect during library initialization. The pipe is bound first,
+        //    but the accept loop starts after spawn because it needs the
+        //    container's PID.
         let mut child_env = spec.env.clone();
+        let mut broker = None;
         if let Some(config) = spec.broker.clone() {
             // `ALL APPLICATION PACKAGES` (S-1-15-2-1): the MXC workload runs
             // in an AppContainer, and an AppContainer cannot open a pipe whose
@@ -60,7 +63,7 @@ impl SandboxBackend for MxcBackend {
             let listener = Listener::bind_with_sids(&["S-1-15-2-1".to_string()])
                 .map_err(|error| format!("cannot create the broker pipe: {error}"))?;
             child_env.set(env::SOCKET, listener.name().as_os_str());
-            start_broker(listener, config);
+            broker = Some((listener, config));
         }
 
         // 2. Environment: MXC inherits the host environment, but MSYS2's
@@ -108,6 +111,13 @@ impl SandboxBackend for MxcBackend {
         let mut process = v1::spawn_with_extended_options(request, options)
             .map_err(|error| format!("cannot start the MXC container: {error}"))?;
 
+        // The accept loop verifies the client PID, so it can only start once
+        // the container exists. The extension may already be blocked connecting
+        // to the pipe; the kernel queues that client until we accept it.
+        if let Some((listener, config)) = broker {
+            start_broker(listener, config, process.id());
+        }
+
         match process
             .wait()
             .map_err(|error| format!("cannot wait for the MXC container: {error}"))?
@@ -119,8 +129,8 @@ impl SandboxBackend for MxcBackend {
 }
 
 /// Start the approval broker on its own thread.
-fn start_broker(listener: Listener, config: BrokerConfig) {
-    std::thread::spawn(move || match listener.accept() {
+fn start_broker(listener: Listener, config: BrokerConfig, agent_pid: u32) {
+    std::thread::spawn(move || match listener.accept_matching(agent_pid) {
         Ok(conn) => {
             let read_half = match conn.try_clone() {
                 Ok(half) => half,

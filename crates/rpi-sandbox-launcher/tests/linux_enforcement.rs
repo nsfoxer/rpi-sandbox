@@ -9,9 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use rpi_sandbox_core::{ApprovalScope, BrokerClient, WriteOp};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn launcher() -> &'static str {
     env!("CARGO_BIN_EXE_rpis")
@@ -147,64 +145,67 @@ fn descendants_inherit_the_domain() {
 }
 
 #[test]
-fn broker_approves_and_revokes_out_of_policy_writes() {
+fn broker_approves_the_agent_but_rejects_children() {
     if !landlock_available() {
         eprintln!("landlock unavailable; skipping");
         return;
     }
-    let allowed = tempfile::tempdir().unwrap();
     let Some(denied) = DeniedDir::new() else {
         eprintln!("/var/tmp unavailable; skipping");
         return;
     };
-    let socket_file = allowed.path().join("socket");
-    let profile_file = allowed.path().join("profile");
     let outside = denied.path().join("broker.txt");
-    let script = format!(
-        "printf '%s' \"$RPI_SANDBOX_SOCKET\" > '{}'; printf '%s' \"$RPI_SANDBOX_PROFILE\" > '{}'; sleep 2",
-        socket_file.display(),
-        profile_file.display()
+    let probe = env!("CARGO_BIN_EXE_rpi-sandbox-probe");
+
+    // The sandboxed agent itself is the broker's peer: hello must succeed.
+    let hello = run(&["--no-extension", "--rpi", probe, "--", "broker-hello"]);
+    assert!(
+        hello.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&hello.stderr)
     );
-    let mut command = Command::new(launcher());
-    command
-        .arg("--no-extension")
-        .arg("--rpi")
-        .arg("/bin/sh")
-        .arg("-c")
-        .arg(&script);
-    let mut child = command.spawn().expect("spawn launcher");
+    let stdout = String::from_utf8_lossy(&hello.stdout);
+    assert!(stdout.contains("sandbox=landlock"), "{stdout}");
+    assert!(stdout.contains("profile=default"), "{stdout}");
 
-    let socket_path = wait_for_value(&socket_file, Duration::from_secs(5))
-        .expect("broker socket path was not published");
-    assert!(socket_path.ends_with(".sock"), "{socket_path}");
-    assert_eq!(std::fs::read_to_string(&profile_file).unwrap(), "default");
-
-    let client = BrokerClient::connect(Path::new(&socket_path)).expect("connect to broker");
-    let hello = client.hello("rpi-sandbox-test", "0.1.0").unwrap();
-    assert_eq!(hello.sandbox.as_deref(), Some("landlock"));
-    assert_eq!(hello.profile.as_deref(), Some("default"));
-
-    assert!(!client.is_approved(&outside, WriteOp::Create));
-    client
-        .approve(
-            &outside,
-            &[WriteOp::Create, WriteOp::Overwrite],
-            ApprovalScope::Session,
-            false,
-        )
-        .unwrap();
-    client.write(&outside, b"through the broker").unwrap();
+    // The agent can approve and write an out-of-policy path through the broker.
+    let write = run(&[
+        "--no-extension",
+        "--rpi",
+        probe,
+        "--",
+        "broker-write",
+        outside.to_str().unwrap(),
+        "through the broker",
+    ]);
+    assert!(
+        write.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&write.stderr)
+    );
     assert_eq!(
         std::fs::read_to_string(&outside).unwrap(),
         "through the broker"
     );
 
-    client.revoke(&outside, false).unwrap();
-    assert!(!client.is_approved(&outside, WriteOp::Create));
-    drop(client);
-
-    let status = child.wait().unwrap();
-    assert!(status.success(), "launcher exited with {status}");
+    // A child process has a different PID, so the broker must reject it. The
+    // probe returns success only when the child's broker write fails.
+    let rejected = denied.path().join("child.txt");
+    let child = run(&[
+        "--no-extension",
+        "--rpi",
+        probe,
+        "--",
+        "spawn-broker-write",
+        rejected.to_str().unwrap(),
+        "child",
+    ]);
+    assert!(
+        child.status.success(),
+        "a child was allowed to use the broker; stderr: {}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(!rejected.exists(), "a child wrote through the broker");
 }
 
 #[test]
@@ -274,17 +275,4 @@ fn cli_paths_are_exported_to_the_extension() {
 fn exit_codes_are_propagated() {
     let output = run_shell(&[], "exit 7");
     assert_eq!(output.status.code(), Some(7));
-}
-
-fn wait_for_value(path: &Path, timeout: Duration) -> Option<String> {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if let Ok(value) = std::fs::read_to_string(path) {
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    None
 }

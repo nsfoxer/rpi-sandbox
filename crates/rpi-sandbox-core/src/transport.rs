@@ -56,6 +56,18 @@ impl Listener {
         })
     }
 
+    /// Block until the peer process matches `expected_pid`.
+    ///
+    /// The broker endpoint is reachable by any process inside the sandbox, so
+    /// the first connection may come from a child or a malicious plugin. Drop
+    /// mismatches and keep accepting instead of letting them occupy the single
+    /// listener slot.
+    pub fn accept_matching(&self, expected_pid: u32) -> io::Result<Conn> {
+        Ok(Conn {
+            inner: self.inner.accept_matching(expected_pid)?,
+        })
+    }
+
     /// Take the endpoint name without unlinking it.
     ///
     /// The Unix launcher uses this in the forked child: the broker parent keeps
@@ -97,6 +109,11 @@ impl Conn {
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.inner.set_write_timeout(timeout)
     }
+
+    /// PID of the connected peer, when the platform can report it.
+    pub fn peer_pid(&self) -> io::Result<u32> {
+        self.inner.peer_pid()
+    }
 }
 
 impl Read for Conn {
@@ -119,6 +136,7 @@ impl Write for Conn {
 mod imp {
     use std::fs::Permissions;
     use std::io::{self, Read, Write};
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
@@ -149,7 +167,20 @@ mod imp {
         }
 
         pub fn accept(&self) -> io::Result<Conn> {
-            Ok(Conn(self.listener.accept()?.0))
+            let (stream, _) = self.listener.accept()?;
+            set_cloexec(&stream)?;
+            Ok(Conn(stream))
+        }
+
+        pub fn accept_matching(&self, expected_pid: u32) -> io::Result<Conn> {
+            loop {
+                let conn = self.accept()?;
+                match conn.peer_pid() {
+                    Ok(pid) if pid == expected_pid => return Ok(conn),
+                    Ok(_) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
         }
 
         pub fn into_name(mut self) -> PathBuf {
@@ -169,7 +200,9 @@ mod imp {
 
     impl Conn {
         pub fn connect(name: &Path) -> io::Result<Self> {
-            UnixStream::connect(name).map(Self)
+            let stream = UnixStream::connect(name)?;
+            set_cloexec(&stream)?;
+            Ok(Self(stream))
         }
 
         pub fn try_clone(&self) -> io::Result<Self> {
@@ -183,6 +216,54 @@ mod imp {
         pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
             self.0.set_write_timeout(timeout)
         }
+
+        /// PID of the process at the other end of the Unix socket.
+        pub fn peer_pid(&self) -> io::Result<u32> {
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: `ucred` is plain old data; zeroing it is a valid
+                // initial value for `getsockopt`.
+                let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+                let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+                // SAFETY: the fd is valid for the lifetime of `self`, and both
+                // out-pointers are valid for the duration of the call.
+                let result = unsafe {
+                    libc::getsockopt(
+                        self.0.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_PEERCRED,
+                        &mut credentials as *mut _ as *mut libc::c_void,
+                        &mut length,
+                    )
+                };
+                if result != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(credentials.pid as u32)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "peer credentials are not available on this platform",
+                ))
+            }
+        }
+    }
+
+    /// Keep the broker endpoint and accepted connections out of `exec`.
+    fn set_cloexec(stream: &UnixStream) -> io::Result<()> {
+        let fd = stream.as_raw_fd();
+        // SAFETY: the fd is owned by `stream` and valid for both calls.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: same fd, valid flags from `F_GETFD`.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     impl Read for Conn {
@@ -207,7 +288,7 @@ mod imp {
     use std::cell::Cell;
     use std::io::{self, Read, Write};
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -222,7 +303,8 @@ mod imp {
     };
     use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+        PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -324,6 +406,50 @@ mod imp {
             Ok(Conn(file))
         }
 
+        pub fn accept_matching(&self, expected_pid: u32) -> io::Result<Conn> {
+            loop {
+                let handle = self.handle.get();
+                if handle.is_null() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "named pipe listener was already consumed",
+                    ));
+                }
+                // SAFETY: the handle is a valid pipe instance owned by us.
+                let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+                if connected == 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
+                        self.handle.set(std::ptr::null_mut());
+                        // SAFETY: we still own the handle.
+                        unsafe { CloseHandle(handle) };
+                        return Err(error);
+                    }
+                }
+                let mut pid: u32 = 0;
+                // SAFETY: the pipe is connected and `pid` is a valid out-pointer.
+                let ok = unsafe { GetNamedPipeClientProcessId(handle, &mut pid) };
+                if ok == 0 {
+                    let error = io::Error::last_os_error();
+                    // SAFETY: the handle is still owned by the listener; drop the
+                    // connection before reporting the failure.
+                    unsafe { DisconnectNamedPipe(handle) };
+                    return Err(error);
+                }
+                if pid != expected_pid {
+                    // The endpoint is reachable by any sandboxed process. Drop
+                    // this client and keep the instance listening for the agent.
+                    // SAFETY: the pipe is connected; the handle stays owned.
+                    unsafe { DisconnectNamedPipe(handle) };
+                    continue;
+                }
+                self.handle.set(std::ptr::null_mut());
+                // SAFETY: ownership transfers to the `File`.
+                let file = unsafe { std::fs::File::from_raw_handle(handle as RawHandle) };
+                return Ok(Conn(file));
+            }
+        }
+
         pub fn into_name(self) -> PathBuf {
             self.name.clone()
         }
@@ -362,6 +488,17 @@ mod imp {
 
         pub fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
             Ok(())
+        }
+
+        pub fn peer_pid(&self) -> io::Result<u32> {
+            let mut pid: u32 = 0;
+            // SAFETY: `self.0` owns a connected pipe handle, and `pid` is valid.
+            let ok =
+                unsafe { GetNamedPipeClientProcessId(self.0.as_raw_handle() as HANDLE, &mut pid) };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(pid)
         }
     }
 
@@ -505,5 +642,20 @@ mod tests {
         let second = Listener::bind().expect("bind");
         assert_ne!(first.name(), second.name());
         assert!(!first.name().as_os_str().is_empty());
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn peer_pid_reports_the_connected_process() {
+        let listener = Listener::bind().expect("bind");
+        let name = listener.name().to_path_buf();
+        let server = std::thread::spawn(move || {
+            let conn = listener.accept().expect("accept");
+            conn.peer_pid().expect("peer pid")
+        });
+        let client = Conn::connect(&name).expect("connect");
+        let pid = server.join().unwrap();
+        assert_eq!(pid, std::process::id());
+        drop(client);
     }
 }

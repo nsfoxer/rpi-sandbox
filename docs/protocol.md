@@ -157,6 +157,13 @@ broker 每处理一个请求追加一行 JSON：
 
 - socket / 命名管道只允许当前用户访问（Unix 权限 `0600`；Windows 管道 ACL 为当前用户 +
   `ALL APPLICATION PACKAGES`，后者仅用于 MXC 容器内的扩展）。
+- broker 只接受 launcher 直接子进程（沙箱内的 rpi）的连接：
+  - Linux 用 `SO_PEERCRED` 校验客户端 PID；
+  - Windows 用 `GetNamedPipeClientProcessId` 校验客户端 PID；
+  - 不匹配的连接会被断开，broker 继续等待下一个连接，避免 bash / 子进程占用单实例槽位。
+- 端点与已接受的连接都设置 `CLOEXEC` / non-inheritable，子进程不能靠继承 fd 绕过校验。
+- **已知边界**：同进程的恶意插件与扩展共享 PID，仍处于 TCB 内；要防它需要 broker
+  在沙箱外直接向用户展示审批 UI，v1 不做。
 - broker 必须重新 `realpath` 并校验路径仍在授权范围内；不信任扩展传来的字符串。
 - broker 在每次变更前重新解析路径，Unix 最终组件使用 `O_NOFOLLOW`。
 - broker 持有 launcher 编译后的 `readonly` 列表；`approve` 和所有变更操作都先检查它，

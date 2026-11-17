@@ -113,7 +113,7 @@ fn supervise(listener: Listener, child: libc::pid_t, config: BrokerConfig) -> ! 
         libc::signal(libc::SIGTERM, libc::SIG_IGN);
     }
 
-    std::thread::spawn(move || match listener.accept() {
+    std::thread::spawn(move || match listener.accept_matching(child as u32) {
         Ok(conn) => {
             let read_half = match conn.try_clone() {
                 Ok(half) => half,
