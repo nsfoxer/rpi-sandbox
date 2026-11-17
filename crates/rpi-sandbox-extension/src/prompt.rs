@@ -7,7 +7,7 @@
 //! mounts, ownership, ACLs, or alternate paths.
 //!
 //! The block states the policy, not the enforcement holes: a model does not
-//! need to be told which protected paths a direct shell write could still
+//! need to be told which readonly paths a direct shell write could still
 //! reach.
 
 use rpi_sandbox_core::SandboxPolicy;
@@ -50,7 +50,7 @@ const ENV_NOTICE: &str =
 
 /// Render the block appended to the run's system prompt.
 ///
-/// Protected paths are only counted: naming them would put secret locations
+/// Readonly paths are only counted: naming them would put secret locations
 /// into the prompt, and `/sandbox` already shows the list to the user.
 pub fn render(policy: &SandboxPolicy, isolated: bool, backend: Option<&str>) -> String {
     if !isolated {
@@ -93,10 +93,10 @@ pub fn render(policy: &SandboxPolicy, isolated: bool, backend: Option<&str>) -> 
         out.push_str(NO_APPROVAL_NOTICE);
     }
 
-    if !policy.protected.is_empty() {
-        let count = policy.protected.len();
+    if !policy.readonly.is_empty() {
+        let count = policy.readonly.len();
         out.push_str(&format!(
-            "\n\n{count} protected {} by policy. Approvals cannot override {}, and\n\
+            "\n\n{count} read-only {} by policy. Approvals cannot override {}, and\n\
              `bash` is not an exception.",
             if count == 1 { "path is" } else { "paths are" },
             if count == 1 { "it" } else { "them" },
@@ -125,7 +125,7 @@ mod tests {
     use super::*;
     use rpi_sandbox_core::{ApprovalSettings, PathRule, SandboxMode};
 
-    fn policy(writable: &[&str], protected: &[&str]) -> SandboxPolicy {
+    fn policy(writable: &[&str], readonly: &[&str]) -> SandboxPolicy {
         SandboxPolicy {
             enabled: true,
             mode: SandboxMode::Auto,
@@ -133,7 +133,7 @@ mod tests {
                 .iter()
                 .map(|path| PathRule::Dir(path.into()))
                 .collect(),
-            protected: protected
+            readonly: readonly
                 .iter()
                 .map(|path| PathRule::Dir(path.into()))
                 .collect(),
@@ -155,17 +155,17 @@ mod tests {
         assert!(text.contains("cannot request"));
         assert!(text.contains("approval, so a denied shell write stays denied"));
         assert!(text.contains("RPI_SANDBOX_ACTIVE=1"));
-        assert!(!text.contains("protected by policy"));
+        assert!(!text.contains("readonly by policy"));
     }
 
     #[test]
-    fn protected_paths_are_counted_but_not_named() {
+    fn readonly_paths_are_counted_but_not_named() {
         let text = render(
             &policy(&["/work"], &["/home/user/.ssh", "/work/.env"]),
             true,
             None,
         );
-        assert!(text.contains("2 protected paths are"));
+        assert!(text.contains("2 read-only paths are"));
         assert!(!text.contains("/home/user/.ssh"));
         assert!(!text.contains("/work/.env"));
     }

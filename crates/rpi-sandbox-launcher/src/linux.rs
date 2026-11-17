@@ -26,7 +26,7 @@ impl SandboxBackend for LandlockBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             name: "landlock",
-            can_subtract_protected: false,
+            can_subtract_readonly: false,
             persistent_side_effects: false,
             needs_read_roots: false,
             missing_root_is_fatal: false,

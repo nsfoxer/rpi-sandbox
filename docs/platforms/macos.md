@@ -44,7 +44,7 @@
 
 - Seatbelt API deprecated，未来系统版本可能移除；保留 `sandbox-exec` 回退。
 - 路径匹配基于 vnode 路径；大小写不敏感文件系统（默认 APFS）需注意规范化。
-- 不能从允许的父目录中扣除 `protected` 子树（与 Landlock 同类限制）。
+- 不能从允许的父目录中扣除 `readonly` 子树（与 Landlock 同类限制）。
 - 某些系统服务（mach lookup、keychain）可能需要额外规则；v1 只处理文件写。
 
 ## 验收

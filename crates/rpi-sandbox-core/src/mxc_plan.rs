@@ -1,8 +1,12 @@
 //! Windows MXC plan.
 //!
 //! Microsoft Execution Containers take a filesystem policy instead of ACLs:
-//! `readwrite_paths`, `readonly_paths`, and `denied_paths`. Building that plan
-//! is pure path arithmetic, so it is unit-tested on every host.
+//! `readwrite_paths` and `readonly_paths`. Building that plan is pure path
+//! arithmetic, so it is unit-tested on every host.
+//!
+//! Policy `readonly` is mapped to `readonly_paths`: MXC ranks a more specific
+//! path above its parent, so a read-only subdirectory subtracts writes from a
+//! writable root while staying readable.
 
 use std::path::{Path, PathBuf};
 
@@ -15,8 +19,6 @@ pub struct MxcPlan {
     pub readwrite: Vec<PathBuf>,
     /// Roots the workload may read.
     pub readonly: Vec<PathBuf>,
-    /// Subpaths that stay inaccessible even inside a readable root.
-    pub denied: Vec<PathBuf>,
 }
 
 impl MxcPlan {
@@ -25,7 +27,7 @@ impl MxcPlan {
     /// MXC only exposes the directories listed here (plus its own system
     /// defaults), so the volume root of every writable/read root is added to
     /// `readonly`: rpi probes `\\?\C:\` while resolving resources and refuses
-    /// to start without it. `denied` keeps `protected` subtractive.
+    /// to start without it.
     pub fn build(policy: &SandboxPolicy, read_roots: &[PathBuf]) -> Self {
         let mut readwrite: Vec<PathBuf> = policy
             .writable
@@ -45,20 +47,17 @@ impl MxcPlan {
             push_volume_root(&mut readonly, root);
             push_unique(&mut readonly, root.clone());
         }
+        for rule in &policy.readonly {
+            let path = rule.path().to_path_buf();
+            if path.exists() {
+                push_unique(&mut readonly, path);
+            }
+        }
         dedupe(&mut readonly);
-
-        let mut denied: Vec<PathBuf> = policy
-            .protected
-            .iter()
-            .map(|rule| rule.path().to_path_buf())
-            .filter(|path| path.exists())
-            .collect();
-        dedupe(&mut denied);
 
         Self {
             readwrite,
             readonly,
-            denied,
         }
     }
 
@@ -70,9 +69,6 @@ impl MxcPlan {
         }
         for path in &self.readonly {
             lines.push(format!("  read  {}", path.display()));
-        }
-        for path in &self.denied {
-            lines.push(format!("  deny  {}", path.display()));
         }
         lines
     }
@@ -106,14 +102,14 @@ mod tests {
     use super::*;
     use crate::policy::{PathRule, SandboxPolicy};
 
-    fn policy(writable: &[&str], protected: &[&str]) -> SandboxPolicy {
+    fn policy(writable: &[&str], readonly: &[&str]) -> SandboxPolicy {
         SandboxPolicy {
             enabled: true,
             writable: writable
                 .iter()
                 .map(|path| PathRule::Dir(PathBuf::from(path)))
                 .collect(),
-            protected: protected
+            readonly: readonly
                 .iter()
                 .map(|path| PathRule::Dir(PathBuf::from(path)))
                 .collect(),
@@ -126,7 +122,6 @@ mod tests {
         let plan = MxcPlan::build(&policy(&[r"C:\work"], &[]), &[]);
         assert_eq!(plan.readwrite, vec![PathBuf::from(r"C:\work")]);
         assert_eq!(plan.readonly, vec![PathBuf::from(r"C:\")]);
-        assert!(plan.denied.is_empty());
     }
 
     #[test]
@@ -147,17 +142,46 @@ mod tests {
     }
 
     #[test]
-    fn missing_protected_paths_are_skipped() {
+    fn readonly_subdir_is_added_to_the_read_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        std::fs::create_dir(&secret).unwrap();
+        let plan = MxcPlan::build(
+            &SandboxPolicy {
+                enabled: true,
+                writable: vec![PathRule::Dir(dir.path().to_path_buf())],
+                readonly: vec![PathRule::Dir(secret.clone())],
+                ..SandboxPolicy::default()
+            },
+            &[],
+        );
+        assert!(plan.readwrite.contains(&dir.path().to_path_buf()));
+        assert!(plan.readonly.contains(&secret));
+    }
+
+    #[test]
+    fn missing_readonly_paths_are_skipped() {
         let plan = MxcPlan::build(&policy(&[r"C:\work"], &[r"C:\does-not-exist"]), &[]);
-        assert!(plan.denied.is_empty());
+        assert!(!plan.readonly.contains(&PathBuf::from(r"C:\does-not-exist")));
     }
 
     #[test]
     fn the_plan_describes_every_section() {
-        let plan = MxcPlan::build(&policy(&[r"C:\work"], &[]), &[PathBuf::from(r"C:\agent")]);
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        std::fs::create_dir(&secret).unwrap();
+        let plan = MxcPlan::build(
+            &SandboxPolicy {
+                enabled: true,
+                writable: vec![PathRule::Dir(dir.path().to_path_buf())],
+                readonly: vec![PathRule::Dir(secret)],
+                ..SandboxPolicy::default()
+            },
+            &[],
+        );
         let text = plan.describe().join("\n");
         assert!(text.contains("windows-mxc"));
-        assert!(text.contains("write C:\\work"));
-        assert!(text.contains("read  C:\\agent"));
+        assert!(text.contains("write "));
+        assert!(text.contains("read "));
     }
 }

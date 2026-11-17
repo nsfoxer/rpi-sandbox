@@ -32,8 +32,8 @@ pub mod env {
     pub const CONFIG: &str = "RPI_SANDBOX_CONFIG";
     /// Newline-separated `--write` paths from the launcher.
     pub const WRITABLE: &str = "RPI_SANDBOX_WRITABLE";
-    /// Newline-separated `--protect` paths from the launcher.
-    pub const PROTECTED: &str = "RPI_SANDBOX_PROTECTED";
+    /// Newline-separated `--readonly` paths from the launcher.
+    pub const READONLY: &str = "RPI_SANDBOX_READONLY";
     /// Path of the launcher's compiled policy snapshot (JSON).
     ///
     /// The extension prefers this file over re-compiling configuration, so the
@@ -41,7 +41,7 @@ pub mod env {
     pub const POLICY: &str = "RPI_SANDBOX_POLICY";
     /// Every variable above, for wholesale removal before re-applying them.
     pub const ALL: [&str; 8] = [
-        ACTIVE, SOCKET, PROFILE, VERSION, CONFIG, WRITABLE, PROTECTED, POLICY,
+        ACTIVE, SOCKET, PROFILE, VERSION, CONFIG, WRITABLE, READONLY, POLICY,
     ];
 }
 
@@ -247,8 +247,8 @@ pub enum ErrorCode {
     InvalidPath,
     /// Symlink resolution escaped the approved subtree.
     UnsafePath,
-    /// Path is protected by policy; approvals cannot override it.
-    Protected,
+    /// Path is read-only by policy; approvals cannot override it.
+    ReadOnly,
     /// The active sandbox backend refused the write (`EACCES` / access denied).
     PermissionDenied,
     /// Underlying I/O failure.
@@ -272,7 +272,7 @@ impl ErrorCode {
             Self::NotApproved => "not_approved",
             Self::InvalidPath => "invalid_path",
             Self::UnsafePath => "unsafe_path",
-            Self::Protected => "protected",
+            Self::ReadOnly => "read_only",
             Self::PermissionDenied => "permission_denied",
             Self::Io => "io",
             Self::TooLarge => "too_large",
@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(env::VERSION, "RPI_SANDBOX_VERSION");
         assert_eq!(env::CONFIG, "RPI_SANDBOX_CONFIG");
         assert_eq!(env::WRITABLE, "RPI_SANDBOX_WRITABLE");
-        assert_eq!(env::PROTECTED, "RPI_SANDBOX_PROTECTED");
+        assert_eq!(env::READONLY, "RPI_SANDBOX_READONLY");
         assert_eq!(PROTOCOL_VERSION, 1);
     }
 }

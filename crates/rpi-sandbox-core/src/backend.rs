@@ -38,11 +38,11 @@ use crate::probe::SandboxSupport;
 pub struct BackendCapabilities {
     /// Stable backend name (`landlock`, `windows-mxc`, `seatbelt`, `none`).
     pub name: &'static str,
-    /// Whether `protected` can be subtracted from inside a writable root.
+    /// Whether `readonly` can be subtracted from inside a writable root.
     ///
     /// Landlock is additive, so it cannot. MXC `denied_paths` and Seatbelt
     /// rules can.
-    pub can_subtract_protected: bool,
+    pub can_subtract_readonly: bool,
     /// Whether applying the sandbox mutates persistent state that must be
     /// rolled back (legacy ACL backends). MXC never does.
     pub persistent_side_effects: bool,
@@ -57,7 +57,7 @@ impl BackendCapabilities {
     /// Capabilities of the explicit "no confinement" backend.
     pub const NONE: BackendCapabilities = BackendCapabilities {
         name: "none",
-        can_subtract_protected: false,
+        can_subtract_readonly: false,
         persistent_side_effects: false,
         needs_read_roots: false,
         missing_root_is_fatal: false,
@@ -101,7 +101,7 @@ impl SandboxEnv {
             crate::protocol::env::PROFILE,
             crate::protocol::env::VERSION,
             crate::protocol::env::WRITABLE,
-            crate::protocol::env::PROTECTED,
+            crate::protocol::env::READONLY,
             crate::protocol::env::POLICY,
         ] {
             self.remove(name);
@@ -331,7 +331,7 @@ mod tests {
     fn none_backend_names_itself() {
         let backend = NoneBackend;
         assert_eq!(backend.capabilities().name, "none");
-        assert!(!backend.capabilities().can_subtract_protected);
+        assert!(!backend.capabilities().can_subtract_readonly);
         assert_eq!(
             backend.plan(&SandboxPolicy::default()).unwrap(),
             BackendPlan::None

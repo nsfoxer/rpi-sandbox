@@ -141,7 +141,7 @@ core 的 `libc` 仅在 Unix 启用。
 ### Phase 4（Windows，已完成）
 
 - [x] MXC `processcontainer` + 命名管道 broker
-- [x] `writable` / `read_roots` / `protected` → `readwrite_paths` / `readonly_paths` / `denied_paths`
+- [x] `writable` / `read_roots` / `readonly` → `readwrite_paths` / `readonly_paths`（readonly 合并）
 - [x] MXC 不支持时自动降级为「不隔离」（`mode = required` 拒绝启动）
 - [x] 8 个集成测试（允许/拒绝/子进程/授权/退出码/print-plan）
 
@@ -173,7 +173,7 @@ core 的 `libc` 仅在 Unix 启用。
 ### broker
 
 - 只接受绝对路径；`realpath` 后必须仍在授权子树内。
-- 持有 launcher 编译后的 `protected`，`approve` 和所有写操作都先拒绝 protected。
+- 持有 launcher 编译后的 `readonly`，`approve` 和所有写操作都先拒绝 readonly。
 - 每次写操作前校验授权；`once` 授权用后即焚。
 - 审计失败不能阻止写操作，但要 stderr 警告。
 - 协议版本不匹配直接拒绝，不做兼容猜测。
@@ -189,7 +189,7 @@ core 的 `libc` 仅在 Unix 启用。
   所以“事后解释”不可行；必须在 `before_agent_start` 里提前说明。
 - 该钩子是**替换**语义：读 envelope 的 `systemPrompt`，追加后再返回；为空时保持不变。
 - 用标题 `## Sandbox (rpi-sandbox)` 做幂等，`/reload` 不会叠加。
-- 只列可写根；protected 只给数量，不把 `.ssh`、`.env` 等路径写进提示词。
+- 只列可写根；readonly 只给数量，不把 `.ssh`、`.env` 等路径写进提示词。
 - 老 host 的 `PluginApi` 更短：先比较 `struct_size`，缺失时优雅降级。
 
 ## 5. 测试与命令
@@ -237,15 +237,17 @@ env -u SSH_ASKPASS cargo test ...
 2. **Landlock 规则绑定 inode**：启动后删除重建的可写目录会失效，重启恢复。
 3. **软链根**：Fedora 上 `/srv -> /var/srv`、`/home -> /var/home`；路径解析要“最深的已存在
    祖先 + 剩余组件”。
-4. **嵌套 `protected`**：内核不能从可写父目录中扣除子树；启动警告或 `required` 拒绝。
+4. **嵌套 `readonly`**：Linux Landlock 不能扣除子树，只做工具层，启动不再警告/拒绝；
+   Windows MXC 用 `readonly_paths` 覆盖，可读不可写（`git commit` 已实测正常）。
 5. **MXC 读白名单**：必须显式列出卷根（rpi 探测 `\?\C:\`）、agent 目录和工具目录；
    否则 rpi 启动时报 `checking resource ancestor ... 拒绝访问`。
 6. **MXC 的 UI/网络默认值**：`UiPolicy.disable = true` 会让 `ole32.dll` 初始化失败
    （rpi 静态导入 ole32/USER32/SHELL32）；egress 默认 Deny，模型请求会直接失败。
 7. **命名管道与 AppContainer**：MXC workload 在 AppContainer 中，管道 DACL 必须包含
    `S-1-15-2-1`（ALL APPLICATION PACKAGES），否则扩展得到 `os error 5`。
-8. **扩展重复加载**：`rpis` 已自动注入同目录扩展；不要同时放在 `~/.rpi/agent/extensions`，
-   否则两个实例抢同一个单实例管道，第二个得到 `ERROR_PIPE_BUSY (231)`。
+8. **扩展安装**：优先放在 `~/.rpi/agent/extensions`（或
+   `$RPI_CODING_AGENT_DIR/extensions`）。`rpis` 检测到插件已安装会跳过同目录 DLL 注入，
+   避免两个实例抢同一个单实例管道（第二个得到 `ERROR_PIPE_BUSY (231)`）。
 9. **macOS Seatbelt**：API deprecated；保留 `sandbox-exec` 回退方案，路径先 `realpath`。
 10. **headless**：没有 TUI 时授权对话框不可用；必须默认拒绝，并给出可操作错误。
 11. **维护命令**：`install/update/auth/dev` 需要写 `~/.rpi`、`~/.local/bin`；launcher 默认

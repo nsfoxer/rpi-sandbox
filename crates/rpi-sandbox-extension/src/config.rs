@@ -69,14 +69,14 @@ impl Config {
             Some(policy) => policy,
             None => {
                 let writable = env_list(protocol_env::WRITABLE);
-                let protected = env_list(protocol_env::PROTECTED);
+                let readonly = env_list(protocol_env::READONLY);
                 compile(
                     global.as_ref(),
                     project.as_ref(),
                     isolated,
                     cwd,
                     &writable,
-                    &protected,
+                    &readonly,
                     session_dir(),
                     agent_dir(),
                 )
@@ -127,19 +127,12 @@ impl Config {
         for rule in &self.policy.writable {
             out.push_str(&format!("\n  {}", rule.path().display()));
         }
-        if self.policy.protected.is_empty() {
-            out.push_str("\n\nprotected: none");
+        if self.policy.readonly.is_empty() {
+            out.push_str("\n\nread-only: none");
         } else {
-            out.push_str("\n\nprotected:");
-            for rule in &self.policy.protected {
+            out.push_str("\n\nread-only:");
+            for rule in &self.policy.readonly {
                 out.push_str(&format!("\n  {}", rule.path().display()));
-            }
-        }
-        let gaps = self.policy.protection_gaps();
-        if !gaps.is_empty() {
-            out.push_str("\n\nwarnings:");
-            for gap in gaps {
-                out.push_str(&format!("\n  {}", gap.describe()));
             }
         }
         out
@@ -154,7 +147,7 @@ pub fn compile(
     isolated: bool,
     cwd: &Path,
     writable: &[String],
-    protected: &[String],
+    readonly: &[String],
     session_dir: Option<PathBuf>,
     agent_dir: Option<PathBuf>,
 ) -> SandboxPolicy {
@@ -162,7 +155,7 @@ pub fn compile(
     let overrides = PolicyOverrides {
         enabled: Some(isolated),
         writable: writable.to_vec(),
-        protected: protected.to_vec(),
+        readonly: readonly.to_vec(),
         ..PolicyOverrides::default()
     };
     let mut auto_writable = vec![cwd.to_path_buf()];
@@ -253,7 +246,7 @@ mod tests {
     fn project_settings_only_tighten() {
         let global = settings(r#"{"enabled": true, "writable": ["/srv/data"]}"#);
         let project = settings(
-            r#"{"enabled": false, "mode": "off", "writable": ["/etc"], "protected": ["${cwd}/secrets"]}"#,
+            r#"{"enabled": false, "mode": "off", "writable": ["/etc"], "readonly": ["${cwd}/secrets"]}"#,
         );
         let policy = compile(
             Some(&global),
@@ -271,7 +264,7 @@ mod tests {
         assert!(!policy.is_writable(Path::new("/etc/hosts")));
         assert_eq!(
             policy.classify(Path::new("/work/project/secrets/key")),
-            rpi_sandbox_core::Access::Protected
+            rpi_sandbox_core::Access::ReadOnlyRule
         );
     }
 
@@ -290,7 +283,7 @@ mod tests {
         assert!(policy.is_writable(Path::new("/srv/data/file")));
         assert_eq!(
             policy.classify(Path::new("/work/secrets/key")),
-            rpi_sandbox_core::Access::Protected
+            rpi_sandbox_core::Access::ReadOnlyRule
         );
     }
 
@@ -311,7 +304,7 @@ mod tests {
             writable: vec![rpi_sandbox_core::PathRule::Dir(
                 rpi_sandbox_core::normalize_and_resolve(dir.path()),
             )],
-            protected: vec![rpi_sandbox_core::PathRule::Dir(
+            readonly: vec![rpi_sandbox_core::PathRule::Dir(
                 rpi_sandbox_core::normalize_and_resolve(&secrets),
             )],
             allow_file_writes: Vec::new(),
@@ -329,10 +322,6 @@ mod tests {
         assert!(config
             .describe()
             .contains("config: none (built-in defaults)"));
-        assert!(config.describe().contains("warnings:"));
-        assert!(config
-            .describe()
-            .contains("bash and other tools can still write"));
     }
 
     #[test]

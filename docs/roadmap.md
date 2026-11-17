@@ -33,7 +33,7 @@
 ### 任务
 
 - [x] launcher 参数：
-  - `--profile <name>`、`--config <path>`、`--write <dir>`、`--protect <path>`
+  - `--profile <name>`、`--config <path>`、`--write <dir>`、`--readonly <path>`
   - `--mode auto|required`、`--audit <path>`、`--no-broker`
   - `--rpi <path>`、`--no-extension`、`--`（其余参数直接转给 rpi）
 - [x] 启动顺序：解析 → socket → fork broker → Landlock → `exec`
@@ -65,8 +65,8 @@
 - [x] `UiDialog` 授权：`allow_once` / `allow_always` / 显式目录加宽 / `reject_once`
 - [x] 越权写：先 `check`，再向 broker 发 `approve` + `write`
 - [x] 配置：`~/.rpi/agent/sandbox.json` 与 `.rpi/sandbox.json`（只收紧）；CLI 覆盖经环境变量共享
-- [x] broker 强制 `protected`：`approve` 与所有变更操作都拒绝，授权不能覆盖
-- [x] 配置形状检查：嵌套 protected / 缺失 inode / allowFileWrites 冲突给出警告，`required` 拒绝
+- [x] broker 强制 `readonly`：`approve` 与所有变更操作都拒绝，授权不能覆盖
+- [x] 配置形状检查：嵌套 readonly / 缺失 inode / allowFileWrites 冲突给出警告，`required` 拒绝
 - [x] 模型提示：`before_agent_start` 追加可写根、`EACCES` 语义与授权路径，避免模型误判为权限问题
 - [x] 授权持久化：会话内由 broker 内存持有
 - [x] 审计：策略中的 `auditLog`；broker 写
@@ -114,7 +114,7 @@
 ### 任务
 
 - [x] MXC `processcontainer` + 命名管道 broker
-- [x] 策略映射：`writable` / `read_roots` / `protected` → write / read / deny 路径
+- [x] 策略映射：`writable` / `read_roots` / `readonly` → write / read / deny 路径
 - [x] 读白名单、网络 egress、Win32k（ole32 初始化）适配
 - [x] MXC 不支持时自动降级为不隔离（`required` 拒绝）
 - [x] 集成测试：允许/拒绝/子进程/授权/退出码/`--print-plan`
@@ -129,9 +129,9 @@
 
 ## Phase 5：加固与扩展（持续）
 
-- [ ] 读限制（Landlock `READ_FILE/READ_DIR`、SBPL；Windows MXC 已支持 `denied_paths`）
+- [ ] 读限制（Landlock `READ_FILE/READ_DIR`、SBPL；Windows MXC 可用 `readonly_paths` 覆盖 readonly）
 - [ ] broker 写入加固：`openat2(RESOLVE_BENEATH)` 消除父目录符号链接竞态
-- [ ] Linux 嵌套内核只读：userns + mount namespace + 只读 bind + 丢 caps（`protected` 透明生效）
+- [ ] Linux 嵌套内核只读：userns + mount namespace + 只读 bind + 丢 caps（`readonly` 透明生效）
 - [ ] 网络限制（Landlock ABI 4+、SBPL、Windows Firewall/WFP）
 - [ ] 进程/执行限制（seccomp、Job Object、SBPL process-exec）
 - [ ] 多 profile 与按项目选择
@@ -143,7 +143,7 @@
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| Landlock 只能加权限，不能扣除嵌套 `protected` | 策略不完整 | 启动告警 / `required` 拒绝；Phase 5 目录枚举方案 |
+| Landlock 只能加权限，不能扣除嵌套 `readonly` | 策略不完整 | 启动告警 / `required` 拒绝；Phase 5 目录枚举方案 |
 | Landlock 规则绑定 inode | 目录重建后失效 | 文档说明，重启恢复 |
 | macOS Seatbelt API deprecated | 未来可能移除 | 隔离封装，保留 `sandbox-exec` 回退 |
 | MXC 不可用 / Windows 版本过旧 | 自动降级为不隔离 | 明确告警；`mode = required` 拒绝启动 |

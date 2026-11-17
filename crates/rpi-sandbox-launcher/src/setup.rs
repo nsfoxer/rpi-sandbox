@@ -78,8 +78,8 @@ pub fn run(args: Args) -> Result<i32, String> {
         if !args.writable.is_empty() {
             sandbox_env.set(env::WRITABLE, args.writable.join("\n"));
         }
-        if !args.protected.is_empty() {
-            sandbox_env.set(env::PROTECTED, args.protected.join("\n"));
+        if !args.readonly.is_empty() {
+            sandbox_env.set(env::READONLY, args.readonly.join("\n"));
         }
         match write_policy_snapshot(&policy) {
             Ok(path) => sandbox_env.set(env::POLICY, path.into_os_string()),
@@ -92,7 +92,7 @@ pub fn run(args: Args) -> Result<i32, String> {
             audit: policy.audit_log.clone(),
             backend: Some(plan.backend_name().to_string()),
             profile: Some(args.profile.clone()),
-            protected: policy.protected.clone(),
+            readonly: policy.readonly.clone(),
             ..BrokerConfig::default()
         })
     } else {
@@ -138,16 +138,13 @@ pub fn startup_action(
     if !policy.enabled || policy.mode == SandboxMode::Off {
         return Ok(Startup::Unconfined("disabled".to_string()));
     }
+    // Warn when this backend cannot enforce `readonly` in the kernel.
+    // Windows MXC maps it to a read-only subpath; Linux Landlock cannot
+    // subtract a subtree, so only the tool layer and broker stop writes.
     for gap in policy.protection_gaps() {
-        if !gap.blocks_enforcement(capabilities) {
-            // The backend can subtract the subtree (MXC `denied_paths`, Seatbelt).
-            continue;
+        if gap.blocks_enforcement(capabilities) {
+            eprintln!("warning: sandbox: {}", gap.describe());
         }
-        let detail = gap.describe();
-        if policy.mode == SandboxMode::Required {
-            return Err(format!("sandbox is required but {detail}"));
-        }
-        eprintln!("warning: sandbox: {detail}");
     }
     match support {
         SandboxSupport::Supported(_) => Ok(Startup::Isolate),
@@ -175,8 +172,8 @@ fn print_plan(policy: &SandboxPolicy, plan: &BackendPlan) {
     for rule in &policy.writable {
         println!("  writable: {:?} {}", rule, rule.path().display());
     }
-    for rule in &policy.protected {
-        println!("  protected: {}", rule.path().display());
+    for rule in &policy.readonly {
+        println!("  readonly: {}", rule.path().display());
     }
     for rule in &policy.allow_file_writes {
         println!("  allowFileWrite: {}", rule.path().display());
@@ -276,15 +273,29 @@ fn is_executable(path: &Path) -> bool {
 
 /// The extension shipped next to the launcher, if the build produced one.
 pub fn bundled_extension() -> Option<PathBuf> {
-    let name = if cfg!(target_os = "macos") {
+    let name = extension_file_name();
+    // Prefer the installed plugin: rpi loads it from the extension directory,
+    // and injecting the copy next to rpis would load two instances (two broker
+    // connections; the second fails with ERROR_PIPE_BUSY).
+    if let Some(agent) = agent_dir() {
+        let installed = agent.join("extensions").join(name);
+        if installed.is_file() {
+            return None;
+        }
+    }
+    let path = std::env::current_exe().ok()?.parent()?.join(name);
+    path.is_file().then_some(path)
+}
+
+/// File name of the bundled sandbox extension on this platform.
+pub fn extension_file_name() -> &'static str {
+    if cfg!(target_os = "macos") {
         "librpi_sandbox_extension.dylib"
     } else if cfg!(target_os = "windows") {
         "rpi_sandbox_extension.dll"
     } else {
         "librpi_sandbox_extension.so"
-    };
-    let path = std::env::current_exe().ok()?.parent()?.join(name);
-    path.is_file().then_some(path)
+    }
 }
 
 /// Prepend an explicit `--extension` for the bundled cdylib.
@@ -351,7 +362,7 @@ pub fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<Pa
         enabled: Some(enabled),
         mode: args.mode,
         writable: args.writable.clone(),
-        protected: args.protected.clone(),
+        readonly: args.readonly.clone(),
         allow_file_writes: Vec::new(),
     };
 
@@ -431,7 +442,7 @@ mod tests {
     fn caps() -> BackendCapabilities {
         BackendCapabilities {
             name: "test",
-            can_subtract_protected: false,
+            can_subtract_readonly: false,
             persistent_side_effects: false,
             needs_read_roots: false,
             missing_root_is_fatal: false,
@@ -468,24 +479,27 @@ mod tests {
     }
 
     #[test]
-    fn required_rejects_nested_protection_without_subtree_denial() {
+    fn required_accepts_nested_protection() {
         let mut restricted = policy(true, SandboxMode::Required);
         restricted.writable = vec![PathRule::Dir(PathBuf::from("/tmp"))];
-        restricted.protected = vec![PathRule::Dir(PathBuf::from("/tmp/.ssh"))];
+        restricted.readonly = vec![PathRule::Dir(PathBuf::from("/tmp/.ssh"))];
         let support = SandboxSupport::Supported(BackendKind::Landlock { abi: 6 });
-        assert!(startup_action(&restricted, caps(), &support).is_err());
+        assert_eq!(
+            startup_action(&restricted, caps(), &support).unwrap(),
+            Startup::Isolate
+        );
     }
 
     #[test]
-    fn a_backend_that_can_subtract_protected_accepts_nested_protection() {
+    fn a_backend_that_can_subtract_readonly_accepts_nested_protection() {
         let dir = tempfile::tempdir().unwrap();
         let secret = dir.path().join(".ssh");
         std::fs::create_dir(&secret).unwrap();
         let mut restricted = policy(true, SandboxMode::Required);
         restricted.writable = vec![PathRule::Dir(dir.path().to_path_buf())];
-        restricted.protected = vec![PathRule::Dir(secret)];
+        restricted.readonly = vec![PathRule::Dir(secret)];
         let mut capabilities = caps();
-        capabilities.can_subtract_protected = true;
+        capabilities.can_subtract_readonly = true;
         let support = SandboxSupport::Supported(BackendKind::WindowsMxc);
         assert_eq!(
             startup_action(&restricted, capabilities, &support).unwrap(),
@@ -571,7 +585,7 @@ mod tests {
     fn policy_snapshot_round_trips() {
         let mut snapshot = policy(true, SandboxMode::Auto);
         snapshot.writable = vec![PathRule::Dir(PathBuf::from("/work"))];
-        snapshot.protected = vec![PathRule::File(PathBuf::from("/work/.env"))];
+        snapshot.readonly = vec![PathRule::File(PathBuf::from("/work/.env"))];
         snapshot.approval = ApprovalSettings::default();
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let decoded: SandboxPolicy = serde_json::from_str(&encoded).unwrap();

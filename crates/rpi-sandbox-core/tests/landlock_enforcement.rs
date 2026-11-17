@@ -19,7 +19,7 @@ fn policy(allowed: PathBuf) -> SandboxPolicy {
         enabled: true,
         mode: SandboxMode::Auto,
         writable: vec![PathRule::Dir(allowed)],
-        protected: Vec::new(),
+        readonly: Vec::new(),
         allow_file_writes: Vec::new(),
         approval: ApprovalSettings::default(),
         audit_log: None,

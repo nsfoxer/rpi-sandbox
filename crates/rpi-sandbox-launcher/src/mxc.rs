@@ -25,8 +25,8 @@ impl SandboxBackend for MxcBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             name: "windows-mxc",
-            // `denied_paths` can subtract a protected subtree.
-            can_subtract_protected: true,
+            // A read-only subpath subtracts writes from a writable parent.
+            can_subtract_readonly: true,
             // MXC applies the policy per container; no ACLs to roll back.
             persistent_side_effects: false,
             // MXC only exposes explicitly listed roots (plus system defaults).
@@ -73,7 +73,9 @@ impl SandboxBackend for MxcBackend {
             filesystem: Some(v1::FilesystemPolicy {
                 readwrite_paths: display_paths(&plan.readwrite),
                 readonly_paths: display_paths(&plan.readonly),
-                denied_paths: display_paths(&plan.denied),
+                // `readonly` is mapped to readonly: MXC ranks a more
+                // specific path above its parent, so readonly stays readable.
+                denied_paths: Vec::new(),
                 clear_policy_on_exit: None,
             }),
             // MXC denies egress by default; rpi needs the model API.

@@ -12,7 +12,7 @@ rpis.exe（不受限）
  3. 创建命名管道 broker（DACL 授予当前用户 + ALL APPLICATION PACKAGES）
  4. 构造 ContainerRequest：
       containment    = Process（Windows 解析为 ProcessContainer/PSEC）
-      filesystem     = readwrite_paths / readonly_paths / denied_paths
+      filesystem     = readwrite_paths / readonly_paths（readonly 合并于此）
       network.egress = Allow
       ui             = disable=false
       stdio          = Inherit（TUI 直接用当前终端）
@@ -37,7 +37,7 @@ rpis.exe（不受限）
 | 启动/退出成本 | O(文件数) | O(1) |
 | 磁盘副作用 | 持久 ACL + journal | 无 |
 | 崩溃残留 | 需要清理 | 无 |
-| `protected` 扣除 | Deny ACE | `denied_paths`（还能禁读） |
+| `readonly` 扣除 | Deny ACE | `readonly_paths`（可读不可写） |
 | bcrypt 兼容 | 需要 shim | 系统 `bcrypt.dll` 正常 |
 
 ## 3. 系统要求
@@ -61,7 +61,7 @@ rpis.exe（不受限）
 |---|---|
 | `writable` | `readwrite_paths` |
 | `read_roots`（`--read` + 自动读根） | `readonly_paths` |
-| `protected` | `denied_paths`（读写都被拒） |
+| `readonly` | `readonly_paths`（可读不可写） |
 | 网络 | `NetworkPolicy.egress.default = Allow` |
 | 沙箱内 GUI | `UiPolicy.disable = false`（见下） |
 
@@ -74,8 +74,9 @@ MXC 只暴露显式列出的目录（加系统默认）。`MxcPlan::build` 会�
 - launcher 自动收集的读根：`rpi.exe` 所在目录、`rpis.exe` 所在目录、
   `RPI_CODING_AGENT_DIR`、`--read` 指定的目录。
 
-读根是显式白名单：未列出的用户目录（如 `~/.ssh`）默认不可读。`protected` 通过
-`denied_paths` 再扣一层，因此 `.ssh` 即使位于可读的 `C:\` 下也不可读。
+读根是显式白名单：未列出的用户目录（如 `~/.ssh`）默认不可读。`readonly` 映射为
+`readonly_paths`，因此可写父目录中的 readonly 子目录**可读、不可写**。`.ssh` 若被列为
+readonly，读仍跟随读白名单，不会额外禁读。
 
 ### 网络
 
@@ -99,8 +100,9 @@ MXC 的 egress 默认是 **Deny**，实测不设置时 `curl` 连 DNS 都失败�
 - 监听端在容器启动前创建；broker 线程 `accept` 一次并服务到断开；
 - 已知限制：同步命名管道没有 per-call 超时；只允许一个活动连接，
   扩展重复加载时第二次连接会得到 `ERROR_PIPE_BUSY (231)`。
-  **不要**同时把 `rpi_sandbox_extension.dll` 放在 `~/.rpi/agent/extensions`：
-  `rpis` 已经自动注入同目录扩展，重复加载会出现两个实例。
+- 推荐把 `rpi_sandbox_extension.dll` 作为插件安装到
+  `~/.rpi/agent/extensions/`（或 `$RPI_CODING_AGENT_DIR/extensions/`）。
+  `rpis` 检测到插件已安装时会跳过同目录 DLL 的注入，因此不会出现两个实例。
 
 ## 6. 环境
 
@@ -131,7 +133,7 @@ MXC 继承宿主环境，但 `rpis` 可能运行在 MSYS2 下（`PATH=/usr/local
 | 已列出的读根可读；未列出目录不可读 | ✅ |
 | 写根外写入 / 删除 / truncate | ✅ `Access is denied (os error 5)` |
 | `bash`/子进程继承限制 | ✅（`spawn-write` 探针） |
-| `denied_paths`（`.ssh`、`.git/hooks`） | ✅ 读写均被拒 |
+| `readonly` 子目录（`.git/hooks`） | ✅ 可读；写/删除被拒 |
 | broker 握手 / 授权写 / revoke（命名管道） | ✅ |
 | 退出码透传 | ✅ |
 | 启动 + 退出耗时 | ✅ 约 **0.5s**（含容器创建；与项目大小无关） |
@@ -148,5 +150,13 @@ MXC 继承宿主环境，但 `rpis` 可能运行在 MSYS2 下（`PATH=/usr/local
 - `bcrypt-shim/`（MXC 不再需要 `bcrypt.dll` 替换）；
 - `--print-sid`、`--cleanup`（没有合成 SID / ACL journal 了）；
 - ACL journal 目录与相关清理逻辑。
+
+扩展现在作为普通插件安装：
+
+```text
+<RPI_CODING_AGENT_DIR>\extensions\rpi_sandbox_extension.dll
+```
+
+`rpis.exe` 只负责建立边界和 broker；插件从 rpi 的标准扩展目录加载。
 
 `--print-plan` 现在打印 MXC 的 `write` / `read` / `deny` 路径。

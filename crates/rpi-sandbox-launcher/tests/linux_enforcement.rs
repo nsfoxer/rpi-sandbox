@@ -252,20 +252,20 @@ fn cli_paths_are_exported_to_the_extension() {
     }
     let allowed = tempfile::tempdir().unwrap();
     let writable_file = allowed.path().join("writable");
-    let protected_file = allowed.path().join("protected");
+    let readonly_file = allowed.path().join("readonly");
     let script = format!(
-        "printf '%s' \"$RPI_SANDBOX_WRITABLE\" > '{}'; printf '%s' \"$RPI_SANDBOX_PROTECTED\" > '{}'",
+        "printf '%s' \"$RPI_SANDBOX_WRITABLE\" > '{}'; printf '%s' \"$RPI_SANDBOX_READONLY\" > '{}'",
         writable_file.display(),
-        protected_file.display()
+        readonly_file.display()
     );
     let output = run_shell(
-        &["--write", "/srv/data", "--protect", "/srv/secrets"],
+        &["--write", "/srv/data", "--readonly", "/srv/secrets"],
         &script,
     );
     assert!(output.status.success());
     assert_eq!(std::fs::read_to_string(writable_file).unwrap(), "/srv/data");
     assert_eq!(
-        std::fs::read_to_string(protected_file).unwrap(),
+        std::fs::read_to_string(readonly_file).unwrap(),
         "/srv/secrets"
     );
 }

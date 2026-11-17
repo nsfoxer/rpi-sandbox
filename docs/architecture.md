@@ -56,7 +56,7 @@
 
 | 类型 | 作用 |
 |---|---|
-| `BackendCapabilities` | 该后端能强制什么（能否扣除 protected、是否有持久副作用、是否需要读根…） |
+| `BackendCapabilities` | 该后端能强制什么（能否扣除 readonly、是否有持久副作用、是否需要读根…） |
 | `BackendPlan` | 后端计划（Landlock 规则 / MXC 路径策略 / 无），可用 `--print-plan` 打印、可跨平台单测 |
 | `SandboxBackend` | `plan(policy)` + `launch(plan, spec)`；`launch` **允许不返回**（Unix 内部 `exec`） |
 
@@ -70,8 +70,8 @@
 3. 应用隔离：
    - Linux / macOS：对**自身**应用域（Landlock / Seatbelt），随后 `exec rpi`；
    - Windows：用 `mxc-sdk` 创建 MXC 容器（`Containment::Process`），把 `writable` /
-     `read_roots` / `protected` 映射为 `readwrite_paths` / `readonly_paths` /
-     `denied_paths`；父进程保持不受限，作为 broker 并等待容器退出。
+     `read_roots` / `readonly` 映射为 `readwrite_paths` / `readonly_paths`
+     （readonly 合并进 readonly）；父进程保持不受限，作为 broker 并等待容器退出。
 4. 此后创建的所有线程和子进程都继承该边界。
 5. rpi 加载扩展。扩展发现自己处于沙箱内（环境变量），开始执行策略与 UI。
 
@@ -134,7 +134,7 @@
 ## 6. 安全不变量
 
 1. 读操作不因沙箱失败。
-2. 写操作只允许白名单内的路径；`protected` 永远优先于 `writable`（broker 强制执行；
+2. 写操作只允许白名单内的路径；`readonly` 永远优先于 `writable`（broker 强制执行；
    内核只在规则可表达时执行）。
 3. 项目配置不能扩大可写范围，也不能关闭沙箱。
 4. 越权写只能由 broker 在用户授权后执行；沙箱进程始终没有该路径的写权限。

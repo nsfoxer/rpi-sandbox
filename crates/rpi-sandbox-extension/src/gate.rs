@@ -56,7 +56,7 @@ pub enum Outcome {
     /// Let the built-in tool run; the kernel boundary permits the write.
     AllowTool,
     /// The broker performed the write; veto the built-in tool so it does not
-    /// try (and fail) to write a protected path.
+    /// try (and fail) to write a readonly path.
     HandledThroughBroker,
 }
 
@@ -78,9 +78,9 @@ pub fn handle_write(
     let resolved = config::resolve_tool_path(cwd, raw_path);
     match policy.classify(&resolved) {
         Access::Writable => return Ok(Outcome::AllowTool),
-        Access::Protected => {
+        Access::ReadOnlyRule => {
             return Err(format!(
-                "{} is protected by sandbox policy and cannot be written",
+                "{} is readonly by sandbox policy and cannot be written",
                 resolved.display()
             ))
         }
@@ -267,7 +267,7 @@ mod tests {
         }
     }
 
-    fn policy(writable: &[&str], protected: &[&str]) -> SandboxPolicy {
+    fn policy(writable: &[&str], readonly: &[&str]) -> SandboxPolicy {
         SandboxPolicy {
             enabled: true,
             mode: SandboxMode::Auto,
@@ -275,7 +275,7 @@ mod tests {
                 .iter()
                 .map(|p| PathRule::Dir(PathBuf::from(p)))
                 .collect(),
-            protected: protected
+            readonly: readonly
                 .iter()
                 .map(|p| PathRule::Dir(PathBuf::from(p)))
                 .collect(),
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_paths_are_never_approvable() {
+    fn readonly_paths_are_never_approvable() {
         let broker = RecordingBroker::default();
         let approver = FixedApprover(Answer::Allow {
             scope: ApprovalScope::Session,
@@ -324,7 +324,7 @@ mod tests {
             b"x",
         )
         .unwrap_err();
-        assert!(error.contains("protected"));
+        assert!(error.contains("readonly"));
         assert!(broker.written.borrow().is_empty());
     }
 

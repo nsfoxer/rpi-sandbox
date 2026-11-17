@@ -22,11 +22,11 @@ The rpi binary is resolved automatically:
 
 Options:
   --rpi <path>         rpi executable to launch
-  --no-extension       Do not auto-load the bundled sandbox extension
+  --no-extension       Do not inject the DLL next to rpis (installed plugins still load)
   --profile <name>     Profile label advertised on the broker
   --config <path>      Global settings file (default: ~/.rpi/agent/sandbox.json)
   --write <dir>        Extra writable directory (repeatable)
-  --protect <path>     Extra protected path (repeatable)
+  --readonly <path>    Keep a path read-only inside writable roots (repeatable)
   --read <dir>         Extra read root (Windows only; repeatable)
   --mode <mode>        auto | required | off
   --audit <path>       Broker audit log
@@ -70,7 +70,7 @@ pub struct Args {
     pub profile: String,
     pub config: Option<PathBuf>,
     pub writable: Vec<String>,
-    pub protected: Vec<String>,
+    pub readonly: Vec<String>,
     pub read_roots: Vec<String>,
     pub mode: Option<SandboxMode>,
     pub audit: Option<PathBuf>,
@@ -88,7 +88,7 @@ impl Default for Args {
             profile: "default".to_string(),
             config: None,
             writable: Vec::new(),
-            protected: Vec::new(),
+            readonly: Vec::new(),
             read_roots: Vec::new(),
             mode: None,
             audit: None,
@@ -137,7 +137,7 @@ pub fn parse_args<I: Iterator<Item = OsString>>(args: I) -> Result<Args, ParseEr
             "--profile" => parsed.profile = take_value(&mut iter, "--profile")?,
             "--config" => parsed.config = Some(PathBuf::from(take_value(&mut iter, "--config")?)),
             "--write" => parsed.writable.push(take_value(&mut iter, "--write")?),
-            "--protect" => parsed.protected.push(take_value(&mut iter, "--protect")?),
+            "--readonly" => parsed.readonly.push(take_value(&mut iter, "--readonly")?),
             "--read" => parsed.read_roots.push(take_value(&mut iter, "--read")?),
             "--mode" => {
                 let mode = take_value(&mut iter, "--mode")?;
@@ -201,7 +201,7 @@ mod tests {
             "/srv/data",
             "--write",
             "/tmp/out",
-            "--protect",
+            "--readonly",
             "/srv/secrets",
             "--read",
             "/srv/bin",
@@ -218,7 +218,7 @@ mod tests {
         assert!(parsed.no_extension);
         assert_eq!(parsed.profile, "work");
         assert_eq!(parsed.writable, ["/srv/data", "/tmp/out"]);
-        assert_eq!(parsed.protected, ["/srv/secrets"]);
+        assert_eq!(parsed.readonly, ["/srv/secrets"]);
         assert_eq!(parsed.read_roots, ["/srv/bin"]);
         assert_eq!(parsed.mode, Some(SandboxMode::Required));
         assert_eq!(parsed.audit, Some(PathBuf::from("/tmp/audit.jsonl")));

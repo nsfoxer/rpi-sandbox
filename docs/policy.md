@@ -7,7 +7,7 @@ pub struct SandboxPolicy {
     pub enabled: bool,
     pub mode: SandboxMode,             // Auto | Required | Off
     pub writable: Vec<PathRule>,
-    pub protected: Vec<PathRule>,
+    pub readonly: Vec<PathRule>,
     pub allow_file_writes: Vec<PathRule>,
     pub approval: ApprovalSettings,
     pub audit_log: Option<PathBuf>,
@@ -22,7 +22,7 @@ pub enum PathRule {
 优先级：
 
 ```text
-protected  >  writable  >  默认只读
+readonly  >  writable  >  默认只读
 ```
 
 - 目录规则递归命中；文件规则精确匹配。
@@ -34,7 +34,7 @@ protected  >  writable  >  默认只读
 | 位置 | 作用 | 权限 |
 |---|---|---|
 | `~/.rpi/agent/sandbox.json` | 全局策略 | 可增删可写路径、可关闭沙箱 |
-| `<cwd>/.rpi/sandbox.json` | 项目策略 | **只能追加 `protected`，不能放宽或关闭** |
+| `<cwd>/.rpi/sandbox.json` | 项目策略 | **只能追加 `readonly`，不能放宽或关闭** |
 | 命令行参数 | 本次运行 | 与全局同权；用户显式意图 |
 | 环境变量 `RPI_SANDBOX=0` | 本次运行关闭 | 用户显式意图 |
 
@@ -44,8 +44,7 @@ protected  >  writable  >  默认只读
 
 Windows 后端（MXC）的读范围是**显式白名单**：除了系统默认目录，只暴露 `writable` 根、
 `read_roots`（`--read`、rpi/launcher 目录、agent 目录）以及它们的卷根。未列出的用户目录
-默认不可读；`protected` 通过 `denied_paths` 再扣一层，因此即使 `C:\` 可读，
-`${home}/.ssh` 仍不可读写。
+默认不可读；`readonly` 以 `readonly_paths` 覆盖，因此在可读范围内仍然**可读但不可写**。
 
 推荐的全局配置：
 
@@ -54,7 +53,7 @@ Windows 后端（MXC）的读范围是**显式白名单**：除了系统默认�
   "enabled": true,
   "mode": "auto",
   "writable": ["${cwd}", "${tmp}", "${cwd}/.rpi"],
-  "protected": [
+  "readonly": [
     "${home}/.ssh",
     "${home}/.aws",
     "${home}/.gnupg",
@@ -66,15 +65,15 @@ Windows 后端（MXC）的读范围是**显式白名单**：除了系统默认�
 }
 ```
 
-推荐把「下次启动会被加载的东西」也放进 `protected`，例如 `${cwd}/.git/hooks`
+推荐把「下次启动会被加载的东西」也放进 `readonly`，例如 `${cwd}/.git/hooks`
 （阻止 prompt 注入写 git hook）与 `${cwd}/.env`。注意：把整个 `${cwd}/.git` 设为
-protected 会让沙箱内的 `git commit` 失败，因为 git 需要写 `index` 与 `refs`。
+readonly 会让沙箱内的 `git commit` 失败，因为 git 需要写 `index` 与 `refs`。
 
 项目配置示例（只能收紧）：
 
 ```jsonc
 {
-  "protected": ["${cwd}/secrets", "${cwd}/.env"]
+  "readonly": ["${cwd}/secrets", "${cwd}/.env"]
 }
 ```
 
@@ -110,22 +109,25 @@ protected 会让沙箱内的 `git commit` 失败，因为 git 需要写 `index` 
 | `approval.defaultScope` | `session` |
 | `auditLog` | 无（不建议关闭） |
 
-## 6. 嵌套保护（已知限制）
+## 6. 嵌套保护（`readonly`）
 
-内核沙箱（Landlock）只能“累加权限”，不能从已允许的父目录中扣除子目录。因此：
+`readonly` 的定位是「可读不可写」：
 
-- `protected` 落在 `writable` 根之外：内核本来就拒绝；broker 也拒绝授权；
-- `protected` 与某个规则相同，或某个 writable 规则落在 `protected` 之下：该规则会从
-  Landlock 计划中移除，内核层面生效；
-- `allowFileWrites` 文件被 `protected` 覆盖：该文件规则会被移除，并给出提示；
-- `protected` 落在 `writable` 根之内（且不是同一条规则）：内核无法排除，启动器/扩展：
-  - `mode = auto`：明确警告“只有 broker 写入会被拒绝，`bash` 等仍可直接写”；
-  - `mode = required`：拒绝启动；
-  - 扩展在工具层额外拦截（advisory，不覆盖子进程）。
-- `protected` 路径不存在：无法绑定 inode；如果它位于 writable 根内，同样警告或拒绝。
+| 平台 | 行为 |
+|---|---|
+| Windows（MXC） | 映射为 `readonly_paths`。MXC 按「更具体的路径优先」，因此可写父目录中的 readonly 子目录**可读、不可写**（新建、修改、删除都被拒）。已实测：`git commit` 能正常读取 `.git/hooks`。 |
+| Linux（Landlock） | Landlock 只能累加权限，不能扣除子树。`readonly` 只由扩展工具层和 broker 拦截；`bash` 仍可写。**启动会警告（不拒绝）**，因为内核层没有完整实现。 |
 
-**定位**：`protected` 是“永不批准”的授权黑名单，由 broker 强制执行；它不是所有情况下
-的内核只读承诺。真正的嵌套内核只读（userns + 只读 bind + 丢 caps）留在 Phase 5。
+其他规则：
+
+- `readonly` 落在 `writable` 根之外：本来就不可写；工具层/broker 再拒绝；
+- `readonly` 与某个 writable 规则相同：Linux 从内核计划中移除该规则，MXC 以只读覆盖；
+- `allowFileWrites` 被 `readonly` 覆盖：文件规则被移除；
+- `readonly` 路径不存在：不进入内核计划，创建后重启生效（MXC 已实测：不存在的只读路径会被忽略）；
+- `bash` 不受工具层限制：Linux 上可以写 readonly；Windows MXC 上由只读子路径拦截。
+
+**定位**：`readonly` 是「工具层 + 平台能力」的保护，不是跨平台一致的内核边界。Linux 的真正
+嵌套只读（userns + 只读 bind + 丢 caps）仍在 Phase 5。
 
 ## 7. 模型提示（system prompt）
 
@@ -138,7 +140,7 @@ protected 会让沙箱内的 `git commit` 失败，因为 git 需要写 `index` 
 - 说明 `bash` 不能请求授权，越权写要走 `write` / `edit`；授权关闭时明确写“永远拒绝”；
 - 说明 `write`/`edit` 返回 “blocked by `rpi-sandbox-extension`” 时可能已经由 broker 写入，
   应该用 `read` 确认而不是重试；
-- protected 只给数量，不列路径（`/sandbox` 给用户看完整列表）；
+- readonly 只给数量，不列路径（`/sandbox` 给用户看完整列表）；
 - 提示 `RPI_SANDBOX_ACTIVE=1`，模型不需要再探测挂载表。
 
 实现约束：

@@ -54,7 +54,7 @@ for rule in writable:
 
 - 规则绑定 inode：启动后删除重建的可写目录失效；重启恢复。
 - 软链：规则和查询都要解析到真实路径；父目录不存在时按“最深已存在祖先 + 剩余组件”。
-- 嵌套 `protected` 无法由内核扣除；启动警告或 `required` 拒绝。
+- 嵌套 `readonly` 无法由内核扣除；启动警告或 `required` 拒绝。
 - 已打开的 fd 不受影响（launcher 自身日志/会话 fd 属于预期）。
 - `chmod`/`chown`/`utimes` 不在 Landlock 覆盖范围内。
 

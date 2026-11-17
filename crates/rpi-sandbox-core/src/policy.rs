@@ -6,7 +6,7 @@
 //!
 //! Precedence, from strongest to weakest:
 //!
-//! 1. [`PathRule`] entries in [`SandboxPolicy::protected`] (always read-only);
+//! 1. [`PathRule`] entries in [`SandboxPolicy::readonly`] (always read-only);
 //! 2. [`PathRule`] entries in [`SandboxPolicy::writable`] (and
 //!    [`SandboxPolicy::allow_file_writes`]);
 //! 3. everything else is readable but not writable.
@@ -72,7 +72,7 @@ pub struct SandboxSettings {
     pub writable: Vec<String>,
     /// Paths that stay read-only even when a writable rule covers them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub protected: Vec<String>,
+    pub readonly: Vec<String>,
     /// Individual files that may always be written (for example `/dev/null`).
     #[serde(
         default,
@@ -118,10 +118,10 @@ impl PathRule {
 /// Result of classifying a path against a policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
-    /// Covered by a writable rule and not protected.
+    /// Covered by a writable rule and not readonly.
     Writable,
-    /// Covered by a protected rule.
-    Protected,
+    /// Covered by an explicit readonly rule.
+    ReadOnlyRule,
     /// Not covered by any rule: readable, not writable.
     ReadOnly,
 }
@@ -226,8 +226,8 @@ pub struct PolicyOverrides {
     pub mode: Option<SandboxMode>,
     /// `--write <path>`.
     pub writable: Vec<String>,
-    /// `--protect <path>`.
-    pub protected: Vec<String>,
+    /// `--readonly <path>`.
+    pub readonly: Vec<String>,
     /// `--allow-write-file <path>`.
     pub allow_file_writes: Vec<String>,
 }
@@ -246,7 +246,7 @@ pub struct SandboxPolicy {
     /// Rules that allow writes.
     pub writable: Vec<PathRule>,
     /// Rules that force read-only access.
-    pub protected: Vec<PathRule>,
+    pub readonly: Vec<PathRule>,
     /// Individual files exempt from the default read-only behavior.
     pub allow_file_writes: Vec<PathRule>,
     /// Approval prompt behavior.
@@ -255,82 +255,79 @@ pub struct SandboxPolicy {
     pub audit_log: Option<PathBuf>,
 }
 
-/// A policy shape in which `protected` cannot be enforced by the kernel.
+/// A policy shape in which `readonly` cannot be enforced by the kernel.
 ///
 /// Landlock only grants access; it cannot subtract a subtree from a writable
 /// directory. The broker still denies these paths, but direct writes from
 /// `bash` or other tools inside the writable root can bypass the kernel layer.
 /// Surfaces are reported so the launcher can warn (or fail in `required` mode).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProtectionGap {
-    /// A protected path is strictly inside a writable directory rule.
-    ProtectedInsideWritable {
-        /// Protected path.
-        protected: PathBuf,
+pub enum ReadOnlyGap {
+    /// A read-only path is strictly inside a writable directory rule.
+    ReadOnlyInsideWritable {
+        /// Readonly path.
+        readonly: PathBuf,
         /// Writable root that covers it.
         writable: PathBuf,
     },
-    /// A protected path does not exist yet, so the kernel has nothing to bind.
-    MissingProtected {
-        /// Protected path.
+    /// A read-only path does not exist yet, so the kernel has nothing to bind.
+    MissingReadOnly {
+        /// Readonly path.
         path: PathBuf,
     },
-    /// An `allowFileWrites` entry is covered by a protected rule.
-    AllowFileWriteProtected {
+    /// An `allowFileWrites` entry is covered by a read-only rule.
+    AllowFileWriteReadOnly {
         /// File that would otherwise be writable.
         file: PathBuf,
-        /// Protected rule that covers it.
-        protected: PathBuf,
+        /// Readonly rule that covers it.
+        readonly: PathBuf,
     },
 }
 
-impl ProtectionGap {
-    /// Whether this gap means the kernel cannot enforce `protected`.
+impl ReadOnlyGap {
+    /// Whether this gap means the kernel cannot enforce `readonly`.
     ///
-    /// `AllowFileWriteProtected` is excluded: the conflicting rule is dropped
+    /// `AllowFileWriteReadOnly` is excluded: the conflicting rule is dropped
     /// from the Landlock plan, so it is enforced without a bypass.
     pub fn blocks_kernel_enforcement(&self) -> bool {
         matches!(
             self,
-            Self::ProtectedInsideWritable { .. } | Self::MissingProtected { .. }
+            Self::ReadOnlyInsideWritable { .. } | Self::MissingReadOnly { .. }
         )
     }
 
-    /// Whether this gap means `capabilities` cannot enforce `protected`.
+    /// Whether this gap means `capabilities` cannot enforce `readonly`.
     ///
-    /// Landlock is additive, so a protected subtree inside a writable root is
+    /// Landlock is additive, so a readonly subtree inside a writable root is
     /// unenforceable there; Windows deny ACEs and Seatbelt rules can subtract
-    /// it. A missing protected path cannot be enforced anywhere.
+    /// it. A missing readonly path cannot be enforced anywhere.
     pub fn blocks_enforcement(&self, capabilities: crate::backend::BackendCapabilities) -> bool {
         match self {
-            Self::ProtectedInsideWritable { .. } => !capabilities.can_subtract_protected,
-            Self::MissingProtected { .. } => true,
-            Self::AllowFileWriteProtected { .. } => false,
+            Self::ReadOnlyInsideWritable { .. } => !capabilities.can_subtract_readonly,
+            Self::MissingReadOnly { .. } => true,
+            Self::AllowFileWriteReadOnly { .. } => false,
         }
     }
 
     /// Human-readable explanation used by the launcher and `/sandbox`.
     pub fn describe(&self) -> String {
         match self {
-            Self::ProtectedInsideWritable {
-                protected,
-                writable,
-            } => format!(
-                "protected path {} is inside writable root {}; the kernel cannot exclude a \
+            Self::ReadOnlyInsideWritable { readonly, writable } => format!(
+                "read-only path {} is inside writable root {}; the kernel cannot exclude a \
                  subtree, so bash and other tools can still write it directly (only broker \
                  writes are denied)",
-                protected.display(),
+                readonly.display(),
                 writable.display()
             ),
-            Self::MissingProtected { path } => format!(
-                "protected path {} does not exist; it is not protected until it exists and the \
+            Self::MissingReadOnly { path } => format!(
+                "read-only path {} does not exist; it is not read-only until it exists and the \
                  sandbox restarts",
                 path.display()
             ),
-            Self::AllowFileWriteProtected { file, protected } => format!(
-                "allowFileWrites entry {} is covered by protected {} and will not be granted",
+            Self::AllowFileWriteReadOnly { file, readonly } => format!(
+                "allowFileWrites entry {} is covered by read-only {} and will not be granted",
                 file.display(),
-                protected.display()
+                readonly.display()
             ),
         }
     }
@@ -343,8 +340,8 @@ impl SandboxPolicy {
     /// so a symlinked target is compared by its real location.
     pub fn classify(&self, path: &Path) -> Access {
         let path = normalize_and_resolve(path);
-        if self.protected.iter().any(|rule| rule.matches(&path)) {
-            return Access::Protected;
+        if self.readonly.iter().any(|rule| rule.matches(&path)) {
+            return Access::ReadOnlyRule;
         }
         if self.writable.iter().any(|rule| rule.matches(&path))
             || self
@@ -362,42 +359,42 @@ impl SandboxPolicy {
         self.classify(path).is_writable()
     }
 
-    /// Policy shapes the kernel cannot enforce. Empty when `protected` is
-    /// entirely outside writable roots and every protected path exists.
+    /// Policy shapes the kernel cannot enforce. Empty when `readonly` is
+    /// entirely outside writable roots and every readonly path exists.
     ///
-    /// Rules covered by `protected` are filtered out of the Landlock plan, so a
-    /// writable rule *under* a protected path is not reported here: removing it
+    /// Rules covered by `readonly` are filtered out of the Landlock plan, so a
+    /// writable rule *under* a readonly path is not reported here: removing it
     /// is exact enforcement.
-    pub fn protection_gaps(&self) -> Vec<ProtectionGap> {
-        let mut gaps: Vec<ProtectionGap> = Vec::new();
-        for protected in &self.protected {
-            let path = protected.path();
+    pub fn protection_gaps(&self) -> Vec<ReadOnlyGap> {
+        let mut gaps: Vec<ReadOnlyGap> = Vec::new();
+        for readonly in &self.readonly {
+            let path = readonly.path();
             let writable_root = self
                 .writable
                 .iter()
                 .find(|writable| writable.path() != path && writable.matches(path));
             if !path.exists() {
                 if writable_root.is_some() {
-                    gaps.push(ProtectionGap::MissingProtected {
+                    gaps.push(ReadOnlyGap::MissingReadOnly {
                         path: path.to_path_buf(),
                     });
                 }
             } else if let Some(writable) = writable_root {
-                gaps.push(ProtectionGap::ProtectedInsideWritable {
-                    protected: path.to_path_buf(),
+                gaps.push(ReadOnlyGap::ReadOnlyInsideWritable {
+                    readonly: path.to_path_buf(),
                     writable: writable.path().to_path_buf(),
                 });
             }
             for file in &self.allow_file_writes {
-                if protected.matches(file.path()) {
-                    gaps.push(ProtectionGap::AllowFileWriteProtected {
+                if readonly.matches(file.path()) {
+                    gaps.push(ReadOnlyGap::AllowFileWriteReadOnly {
                         file: file.path().to_path_buf(),
-                        protected: path.to_path_buf(),
+                        readonly: path.to_path_buf(),
                     });
                 }
             }
         }
-        let mut unique: Vec<ProtectionGap> = Vec::new();
+        let mut unique: Vec<ReadOnlyGap> = Vec::new();
         for gap in gaps {
             if !unique.contains(&gap) {
                 unique.push(gap);
@@ -406,18 +403,17 @@ impl SandboxPolicy {
         unique
     }
 
-    /// Protected rules that fall inside a writable directory rule.
+    /// Readonly rules that fall inside a writable directory rule.
     ///
     /// Kept for callers that only need the legacy pair list; prefer
     /// [`Self::protection_gaps`] for user-facing diagnostics.
-    pub fn nested_protected(&self) -> Vec<(PathBuf, PathBuf)> {
+    pub fn nested_readonly(&self) -> Vec<(PathBuf, PathBuf)> {
         self.protection_gaps()
             .into_iter()
             .filter_map(|gap| match gap {
-                ProtectionGap::ProtectedInsideWritable {
-                    protected,
-                    writable,
-                } => Some((protected, writable)),
+                ReadOnlyGap::ReadOnlyInsideWritable { readonly, writable } => {
+                    Some((readonly, writable))
+                }
                 _ => None,
             })
             .collect()
@@ -431,7 +427,7 @@ impl SandboxPolicy {
 /// - `enabled`, `mode`, `writable`, `allowFileWrites`, `auditLog` come from the
 ///   global settings file and the CLI only; **project settings are ignored**
 ///   for these fields because a repository is untrusted input.
-/// - `protected` is additive across global, project, and CLI sources.
+/// - `readonly` is additive across global, project, and CLI sources.
 /// - Project settings may turn approvals off (tightening) but may not turn
 ///   them on.
 /// - `cwd` and the system temp directory are always writable; callers pass any
@@ -464,14 +460,14 @@ pub fn compile_policy(
         writable.push(auto_rule(root));
     }
 
-    let mut protected = Vec::new();
+    let mut readonly = Vec::new();
     if let Some(settings) = global {
-        push_dir_rules(&mut protected, &settings.protected, context);
+        push_dir_rules(&mut readonly, &settings.readonly, context);
     }
     if let Some(settings) = project {
-        push_dir_rules(&mut protected, &settings.protected, context);
+        push_dir_rules(&mut readonly, &settings.readonly, context);
     }
-    push_dir_rules(&mut protected, &overrides.protected, context);
+    push_dir_rules(&mut readonly, &overrides.readonly, context);
 
     let mut allow_file_writes = Vec::new();
     if let Some(settings) = global {
@@ -500,14 +496,14 @@ pub fn compile_policy(
         .and_then(|value| expand_configured_path(value, context));
 
     dedupe_rules(&mut writable);
-    dedupe_rules(&mut protected);
+    dedupe_rules(&mut readonly);
     dedupe_rules(&mut allow_file_writes);
 
     SandboxPolicy {
         enabled,
         mode,
         writable,
-        protected,
+        readonly,
         allow_file_writes,
         approval,
         audit_log,
@@ -663,6 +659,14 @@ mod tests {
     }
 
     #[test]
+    fn readonly_is_the_documented_name_for_readonly() {
+        let parsed = settings(r#"{"readonly": ["/srv/secrets"]}"#);
+        assert_eq!(parsed.readonly, ["/srv/secrets"]);
+        let legacy = settings(r#"{"readonly": ["/srv/secrets"]}"#);
+        assert_eq!(legacy.readonly, ["/srv/secrets"]);
+    }
+
+    #[test]
     fn settings_can_enable() {
         let policy = compile_policy(
             Some(&settings(r#"{"enabled": true}"#)),
@@ -736,13 +740,13 @@ mod tests {
     }
 
     #[test]
-    fn protected_wins_over_writable() {
+    fn readonly_wins_over_writable() {
         let policy = compile_policy(
             Some(&settings(
                 r#"{
                     "enabled": true,
                     "writable": ["${cwd}"],
-                    "protected": ["${cwd}/.rpi/agent"]
+                    "readonly": ["${cwd}/.rpi/agent"]
                 }"#,
             )),
             None,
@@ -756,7 +760,7 @@ mod tests {
         );
         assert_eq!(
             policy.classify(Path::new("/work/project/.rpi/agent/models.json")),
-            Access::Protected
+            Access::ReadOnlyRule
         );
     }
 
@@ -815,17 +819,17 @@ mod tests {
     }
 
     #[test]
-    fn project_settings_can_add_protected() {
+    fn project_settings_can_add_readonly() {
         let policy = compile_policy(
             Some(&settings(r#"{"enabled": true}"#)),
-            Some(&settings(r#"{"protected": ["${cwd}/secrets"]}"#)),
+            Some(&settings(r#"{"readonly": ["${cwd}/secrets"]}"#)),
             &PolicyOverrides::default(),
             &context(),
             &[],
         );
         assert_eq!(
             policy.classify(Path::new("/work/project/secrets/key")),
-            Access::Protected
+            Access::ReadOnlyRule
         );
     }
 
@@ -840,17 +844,17 @@ mod tests {
             enabled: true,
             mode: SandboxMode::Auto,
             writable: vec![PathRule::Dir(normalize_and_resolve(&project))],
-            protected: vec![PathRule::Dir(normalize_and_resolve(&secrets))],
+            readonly: vec![PathRule::Dir(normalize_and_resolve(&secrets))],
             allow_file_writes: Vec::new(),
             approval: ApprovalSettings::default(),
             audit_log: None,
         };
-        let nested = policy.nested_protected();
+        let nested = policy.nested_readonly();
         assert_eq!(nested.len(), 1);
         assert_eq!(nested[0].0, normalize_and_resolve(&secrets));
         assert!(matches!(
             policy.protection_gaps().as_slice(),
-            [ProtectionGap::ProtectedInsideWritable { .. }]
+            [ReadOnlyGap::ReadOnlyInsideWritable { .. }]
         ));
     }
 
@@ -895,42 +899,42 @@ mod tests {
             enabled: true,
             mode: SandboxMode::Auto,
             writable: vec![PathRule::Dir(normalize_and_resolve(root))],
-            protected: vec![PathRule::Dir(normalize_and_resolve(&secrets))],
+            readonly: vec![PathRule::Dir(normalize_and_resolve(&secrets))],
             allow_file_writes: Vec::new(),
             approval: ApprovalSettings::default(),
             audit_log: None,
         };
         assert!(matches!(
             policy.protection_gaps().as_slice(),
-            [ProtectionGap::ProtectedInsideWritable { .. }]
+            [ReadOnlyGap::ReadOnlyInsideWritable { .. }]
         ));
 
-        // A missing protected path inside writable is not bound by the kernel.
-        policy.protected = vec![PathRule::Dir(normalize_and_resolve(&root.join("missing")))];
+        // A missing readonly path inside writable is not bound by the kernel.
+        policy.readonly = vec![PathRule::Dir(normalize_and_resolve(&root.join("missing")))];
         assert!(matches!(
             policy.protection_gaps().as_slice(),
-            [ProtectionGap::MissingProtected { .. }]
+            [ReadOnlyGap::MissingReadOnly { .. }]
         ));
 
-        // A writable rule under protected is filtered from Landlock, so it is
+        // A writable rule under readonly is filtered from Landlock, so it is
         // not reported as a gap.
         policy.writable = vec![PathRule::Dir(normalize_and_resolve(&nested.join("sub")))];
-        policy.protected = vec![PathRule::Dir(normalize_and_resolve(&nested))];
+        policy.readonly = vec![PathRule::Dir(normalize_and_resolve(&nested))];
         assert!(policy.protection_gaps().is_empty());
 
-        // An allowFileWrites entry covered by protected is reported (and
+        // An allowFileWrites entry covered by readonly is reported (and
         // filtered from the Landlock plan).
         policy.writable = vec![PathRule::Dir(normalize_and_resolve(root))];
-        policy.protected = vec![PathRule::Dir(normalize_and_resolve(&secrets))];
+        policy.readonly = vec![PathRule::Dir(normalize_and_resolve(&secrets))];
         policy.allow_file_writes =
             vec![PathRule::File(normalize_and_resolve(&secrets.join("key")))];
         assert!(policy
             .protection_gaps()
             .iter()
-            .any(|gap| matches!(gap, ProtectionGap::AllowFileWriteProtected { .. })));
+            .any(|gap| matches!(gap, ReadOnlyGap::AllowFileWriteReadOnly { .. })));
         assert!(policy.protection_gaps().iter().all(|gap| {
             !gap.blocks_kernel_enforcement()
-                || matches!(gap, ProtectionGap::ProtectedInsideWritable { .. })
+                || matches!(gap, ReadOnlyGap::ReadOnlyInsideWritable { .. })
         }));
     }
 
@@ -1027,7 +1031,7 @@ mod tests {
                 "enabled": true,
                 "mode": "required",
                 "writable": ["${cwd}", "${tmp}"],
-                "protected": ["${home}/.ssh"],
+                "readonly": ["${home}/.ssh"],
                 "allowFileWrites": ["/dev/null"],
                 "approval": { "enabled": true, "defaultScope": "once" },
                 "auditLog": "${home}/.rpi/audit/sandbox.jsonl"
@@ -1130,7 +1134,7 @@ mod tests {
             enabled: true,
             mode: SandboxMode::Auto,
             writable: vec![PathRule::Dir(normalize_and_resolve(&allowed))],
-            protected: Vec::new(),
+            readonly: Vec::new(),
             allow_file_writes: Vec::new(),
             approval: ApprovalSettings::default(),
             audit_log: None,

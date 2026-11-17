@@ -242,6 +242,46 @@ fn broker_serves_approvals_over_the_named_pipe() {
 }
 
 #[test]
+fn readonly_subdirectories_stay_readable_but_not_writable() {
+    if skip() {
+        return;
+    }
+    let layout = Layout::new();
+    let secret = layout.work().join("secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::write(secret.join("seed.txt"), "seed").unwrap();
+
+    // Writing inside a readonly subdirectory is rejected by MXC's read-only
+    // ranking, even though the parent is writable.
+    let mut command = layout.base();
+    command
+        .arg("--no-extension")
+        .arg("--rpi")
+        .arg(probe())
+        .arg("--readonly")
+        .arg(secret.to_str().unwrap())
+        .arg("--")
+        .args(["write", secret.join("blocked.txt").to_str().unwrap(), "x"]);
+    let output = command.output().expect("spawn the launcher");
+    assert!(!output.status.success(), "readonly write must fail");
+    assert!(!secret.join("blocked.txt").exists());
+
+    // Reading it still works (unlike `denied_paths`).
+    let mut command = layout.base();
+    command
+        .arg("--no-extension")
+        .arg("--rpi")
+        .arg(probe())
+        .arg("--readonly")
+        .arg(secret.to_str().unwrap())
+        .arg("--")
+        .args(["read", secret.join("seed.txt").to_str().unwrap()]);
+    let output = command.output().expect("spawn the launcher");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("seed"));
+}
+
+#[test]
 fn explicit_bypass_does_not_claim_isolation() {
     if skip() {
         return;
@@ -277,7 +317,7 @@ fn cli_paths_are_exported_to_the_extension() {
         .arg(probe())
         .arg("--write")
         .arg(extra.to_str().unwrap())
-        .arg("--protect")
+        .arg("--readonly")
         .arg(layout.deny().to_str().unwrap())
         .arg("--")
         .args(["env", "RPI_SANDBOX_WRITABLE"]);

@@ -11,8 +11,8 @@
 //! documented "reads everywhere, writes on an allowlist" policy.
 //!
 //! Known kernel limitation: Landlock is additive. An allow rule on a directory
-//! grants the whole subtree, so a `protected` path nested inside a writable
-//! root cannot be subtracted by the kernel. [`SandboxPolicy::nested_protected`]
+//! grants the whole subtree, so a `readonly` path nested inside a writable
+//! root cannot be subtracted by the kernel. [`SandboxPolicy::nested_readonly`]
 //! reports those pairs; the launcher warns (or fails in `required` mode).
 
 use std::collections::BTreeMap;
@@ -124,15 +124,15 @@ pub fn build_plan(policy: &SandboxPolicy, abi: u32) -> LandlockPlan {
         .iter()
         .chain(policy.allow_file_writes.iter())
     {
-        // `protected` always wins. When a rule is *under* a protected path the
-        // rule can simply be omitted, which turns `protected` into real kernel
-        // enforcement for that subtree. A protected path nested inside a
+        // `readonly` always wins. When a rule is *under* a readonly path the
+        // rule can simply be omitted, which turns `readonly` into real kernel
+        // enforcement for that subtree. A readonly path nested inside a
         // writable directory cannot be subtracted here; `protection_gaps`
         // reports it to the user instead.
         if policy
-            .protected
+            .readonly
             .iter()
-            .any(|protected| protected.matches(rule.path()))
+            .any(|readonly| readonly.matches(rule.path()))
         {
             continue;
         }
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_rules_are_not_granted() {
+    fn readonly_rules_are_not_granted() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let child = root.join("writable");
@@ -376,7 +376,7 @@ mod tests {
                 PathRule::Dir(normalize_path(&child)),
                 PathRule::Dir(std::path::PathBuf::from("/tmp")),
             ],
-            protected: vec![PathRule::Dir(normalize_path(root))],
+            readonly: vec![PathRule::Dir(normalize_path(root))],
             allow_file_writes: Vec::new(),
             approval: ApprovalSettings::default(),
             audit_log: None,
@@ -387,7 +387,7 @@ mod tests {
                 .rules
                 .iter()
                 .any(|rule| rule.path == normalize_path(&child)),
-            "a writable rule under protected must be dropped"
+            "a writable rule under readonly must be dropped"
         );
         assert!(
             plan.rules
@@ -400,7 +400,7 @@ mod tests {
             enabled: true,
             mode: SandboxMode::Auto,
             writable: Vec::new(),
-            protected: vec![PathRule::File(std::path::PathBuf::from("/dev/null"))],
+            readonly: vec![PathRule::File(std::path::PathBuf::from("/dev/null"))],
             allow_file_writes: vec![PathRule::File(std::path::PathBuf::from("/dev/null"))],
             approval: ApprovalSettings::default(),
             audit_log: None,
@@ -411,7 +411,7 @@ mod tests {
                 .rules
                 .iter()
                 .any(|rule| rule.path == std::path::PathBuf::from("/dev/null")),
-            "allowFileWrites covered by protected must not be granted"
+            "allowFileWrites covered by readonly must not be granted"
         );
     }
 
@@ -428,7 +428,7 @@ mod tests {
                 PathRule::Dir(PathBuf::from("/tmp")),
                 PathRule::Dir(PathBuf::from("/tmp")),
             ],
-            protected: Vec::new(),
+            readonly: Vec::new(),
             allow_file_writes: Vec::new(),
             approval: crate::policy::ApprovalSettings::default(),
             audit_log: None,

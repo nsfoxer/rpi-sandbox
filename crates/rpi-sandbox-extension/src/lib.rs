@@ -300,9 +300,9 @@ fn handle_edit_call(call: &ToolCall) -> i32 {
     if state.config.policy.is_writable(&resolved) {
         return 0;
     }
-    if state.config.policy.classify(&resolved) == rpi_sandbox_core::Access::Protected {
+    if state.config.policy.classify(&resolved) == rpi_sandbox_core::Access::ReadOnlyRule {
         return finish(Err(format!(
-            "{} is protected by sandbox policy and cannot be written",
+            "{} is read-only by sandbox policy and cannot be written",
             resolved.display()
         )));
     }
@@ -432,7 +432,7 @@ mod tests {
             enabled: true,
             mode: SandboxMode::Auto,
             writable: vec![PathRule::Dir(PathBuf::from(writable))],
-            protected: Vec::new(),
+            readonly: Vec::new(),
             allow_file_writes: Vec::new(),
             approval: rpi_sandbox_core::ApprovalSettings::default(),
             audit_log: None,

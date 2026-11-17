@@ -18,7 +18,7 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `RPI_SANDBOX_CONFIG` | launcher 使用的全局配置文件 |
 | `RPI_SANDBOX_POLICY` | launcher 编译后的策略快照（JSON 文件）。扩展优先读取它，避免与内核边界漂移 |
 | `RPI_SANDBOX_WRITABLE` | 换行分隔的 `--write` 路径（仅隔离时设置） |
-| `RPI_SANDBOX_PROTECTED` | 换行分隔的 `--protect` 路径（仅隔离时设置） |
+| `RPI_SANDBOX_READONLY` | 换行分隔的 `--readonly` 路径（仅隔离时设置） |
 
 命名管道的 DACL 授予当前用户与 `ALL APPLICATION PACKAGES`（`S-1-15-2-1`）：
 
@@ -74,7 +74,7 @@ MXC 的 workload 运行在 AppContainer 中；只授予交互用户的 DACL 会�
 - `scope`：`once` | `session`。
 - `recursive`：`true` 表示覆盖 `path` 的子树（目录授权）。
 - 只记录授权，不执行写入。
-- `protected` 路径永远不会被记录：broker 返回 `protected`，即使父目录已有递归授权。
+- `readonly` 路径永远不会被记录：broker 返回 `read_only`，即使父目录已有递归授权。
 
 ### `check`
 
@@ -133,7 +133,7 @@ MXC 的 workload 运行在 AppContainer 中；只授予交互用户的 DACL 会�
 | `not_approved` | 没有对应授权 |
 | `invalid_path` | 非绝对路径 / 无法解析 |
 | `unsafe_path` | 软链或规范化后逃逸 |
-| `protected` | 路径被策略标记为 protected，任何授权都不能覆盖 |
+| `read_only` | 路径被策略标记为只读，任何授权都不能覆盖 |
 | `permission_denied` | 后端本身拒绝了写（`EACCES` / `Access is denied`） |
 | `io` | 底层 IO 错误 |
 | `too_large` | 负载超限 |
@@ -159,9 +159,9 @@ broker 每处理一个请求追加一行 JSON：
   `ALL APPLICATION PACKAGES`，后者仅用于 MXC 容器内的扩展）。
 - broker 必须重新 `realpath` 并校验路径仍在授权范围内；不信任扩展传来的字符串。
 - broker 在每次变更前重新解析路径，Unix 最终组件使用 `O_NOFOLLOW`。
-- broker 持有 launcher 编译后的 `protected` 列表；`approve` 和所有变更操作都先检查它，
+- broker 持有 launcher 编译后的 `readonly` 列表；`approve` 和所有变更操作都先检查它，
   授权不能覆盖。
-- 扩展在弹窗前先做一次 protected 判定，减少无效询问；broker 是最终裁决者。
+- 扩展在弹窗前先做一次 readonly 判定，减少无效询问；broker 是最终裁决者。
 - **已知限制**：父目录在校验与写入之间被替换为软链的竞态尚未消除，需要
   `openat2(RESOLVE_BENEATH)` 或平台等价机制（见 roadmap Phase 5）。
 - broker 不解析模型输出，只接受结构化路径 + 操作。
