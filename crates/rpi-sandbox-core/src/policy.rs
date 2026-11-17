@@ -54,7 +54,7 @@ impl ApprovalSettings {
     }
 }
 
-/// The `sandbox` block of `sandbox.json`.
+/// The `sandbox` block of `settings.json`.
 ///
 /// Unknown fields are ignored so a newer host can add keys without breaking an
 /// older parser.
@@ -554,17 +554,83 @@ fn dedupe_rules(rules: &mut Vec<PathRule>) {
 ///
 /// A missing file is `Ok(None)` so defaults apply; malformed JSON is an error
 /// so a broken policy fails closed instead of silently widening access.
-pub fn load_settings_file(path: &Path) -> Result<Option<SandboxSettings>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| format!("invalid sandbox settings {}: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!(
-            "cannot read sandbox settings {}: {error}",
-            path.display()
-        )),
+/// Read a settings document with optional `//` line comments.
+///
+/// `settings.json` is shared with the host, so this accepts the same comment
+/// syntax the host's parser does. A missing file yields `None`; malformed JSON
+/// is an error (callers decide whether that is fatal).
+pub fn load_settings_document(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!("cannot read settings {}: {error}", path.display()));
+        }
+    };
+    let parsed =
+        serde_json::from_str(&text).or_else(|_| serde_json::from_str(&strip_line_comments(&text)));
+    parsed
+        .map(Some)
+        .map_err(|error| format!("invalid settings {}: {error}", path.display()))
+}
+
+/// Extract the `sandbox` block from a settings document.
+///
+/// `require_block` is used for an explicit `--config`: pointing at a settings
+/// file without a `sandbox` block is a mistake, not a request for defaults.
+pub fn load_sandbox_block(
+    path: &Path,
+    require_block: bool,
+) -> Result<Option<SandboxSettings>, String> {
+    let Some(document) = load_settings_document(path)? else {
+        return Ok(None);
+    };
+    let Some(block) = document.get("sandbox") else {
+        if require_block {
+            return Err(format!("{} has no `sandbox` block", path.display()));
+        }
+        return Ok(None);
+    };
+    if block.is_null() {
+        return Ok(Some(SandboxSettings::default()));
     }
+    serde_json::from_value(block.clone())
+        .map(Some)
+        .map_err(|error| format!("invalid sandbox block in {}: {error}", path.display()))
+}
+
+/// Remove `//` line comments that are outside a double-quoted string.
+///
+/// Mirrors the host's `settings.json` parser so a commented document still
+/// loads.
+fn strip_line_comments(text: &str) -> String {
+    text.lines()
+        .map(|line| match find_line_comment(line) {
+            Some(index) => line[..index].to_string(),
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn find_line_comment(line: &str) -> Option<usize> {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '/' if !in_string && line.as_bytes().get(index + 1) == Some(&b'/') => {
+                return Some(index);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Expand `${cwd}`, `${home}`, `${tmp}`, and a leading `~`, then resolve
@@ -1084,18 +1150,48 @@ mod tests {
     fn settings_files_are_optional_but_fail_closed() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.json");
-        assert_eq!(load_settings_file(&missing).unwrap(), None);
+        assert_eq!(load_sandbox_block(&missing, false).unwrap(), None);
 
-        let valid = dir.path().join("valid.json");
-        std::fs::write(&valid, r#"{"enabled": true}"#).unwrap();
+        let valid = dir.path().join("settings.json");
+        std::fs::write(&valid, r#"{"sandbox": {"enabled": true}}"#).unwrap();
         assert_eq!(
-            load_settings_file(&valid).unwrap().unwrap().enabled,
+            load_sandbox_block(&valid, false).unwrap().unwrap().enabled,
             Some(true)
         );
 
         let broken = dir.path().join("broken.json");
         std::fs::write(&broken, "{").unwrap();
-        assert!(load_settings_file(&broken).is_err());
+        assert!(load_sandbox_block(&broken, false).is_err());
+    }
+
+    #[test]
+    fn settings_without_a_sandbox_block_are_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(&settings, r#"{"provider": "anthropic"}"#).unwrap();
+        assert_eq!(load_sandbox_block(&settings, false).unwrap(), None);
+        assert!(load_sandbox_block(&settings, true).is_err());
+    }
+
+    #[test]
+    fn settings_accept_line_comments_and_null_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            "{\n  // user settings\n  \"sandbox\": {\n    \"mode\": \"required\"\n  }\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_sandbox_block(&settings, false).unwrap().unwrap().mode,
+            Some(SandboxMode::Required)
+        );
+
+        std::fs::write(&settings, r#"{"sandbox": null}"#).unwrap();
+        assert_eq!(
+            load_sandbox_block(&settings, false).unwrap().unwrap(),
+            SandboxSettings::default()
+        );
     }
 
     #[test]

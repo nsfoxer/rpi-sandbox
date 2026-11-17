@@ -104,7 +104,8 @@
 
 ### sandbox 扩展
 
-- 配置：`~/.rpi/agent/sandbox.json`（全局）与 `.rpi/sandbox.json`（项目，只能收紧）。
+- 配置：`~/.rpi/agent/settings.json` 的 `sandbox` 块（全局）与 `.rpi/settings.json` 的
+  `sandbox` 块（项目，只能收紧）。
 - `ToolCall` veto：解析 `write` / `edit` / `bash` 参数，按策略判断。
 - 授权：`UiDialog`，`purpose: "permission"`，选项 `allow_once` / `allow_always` / `reject_once`。
 - 越权写：把已批准的路径和操作发给 broker。

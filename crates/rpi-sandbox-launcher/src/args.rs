@@ -24,7 +24,7 @@ Options:
   --rpi <path>         rpi executable to launch
   --no-extension       Do not inject the DLL next to rpis (installed plugins still load)
   --profile <name>     Profile label advertised on the broker
-  --config <path>      Global settings file (default: ~/.rpi/agent/sandbox.json)
+  --config <path>      Global settings file (default: ~/.rpi/agent/settings.json)
   --write <dir>        Extra writable directory (repeatable)
   --readonly <path>    Keep a path read-only inside writable roots (repeatable)
   --read <dir>         Extra read root (Windows only; repeatable)

@@ -15,7 +15,7 @@ launcher 在 `exec rpi` 前设置环境变量：
 | `RPI_SANDBOX_SOCKET` | broker 的 socket 路径 / 命名管道名 |
 | `RPI_SANDBOX_PROFILE` | 当前 profile 名称（用于日志与展示） |
 | `RPI_SANDBOX_VERSION=1` | 协议版本 |
-| `RPI_SANDBOX_CONFIG` | launcher 使用的全局配置文件 |
+| `RPI_SANDBOX_CONFIG` | launcher 读取的全局 `settings.json`（含 `sandbox` 块） |
 | `RPI_SANDBOX_POLICY` | launcher 编译后的策略快照（JSON 文件）。扩展优先读取它，避免与内核边界漂移 |
 | `RPI_SANDBOX_WRITABLE` | 换行分隔的 `--write` 路径（仅隔离时设置） |
 | `RPI_SANDBOX_READONLY` | 换行分隔的 `--readonly` 路径（仅隔离时设置） |

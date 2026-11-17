@@ -64,7 +64,7 @@
   - `bash`：整进程已隔离，默认放行
 - [x] `UiDialog` 授权：`allow_once` / `allow_always` / 显式目录加宽 / `reject_once`
 - [x] 越权写：先 `check`，再向 broker 发 `approve` + `write`
-- [x] 配置：`~/.rpi/agent/sandbox.json` 与 `.rpi/sandbox.json`（只收紧）；CLI 覆盖经环境变量共享
+- [x] 配置：`~/.rpi/agent/settings.json` 与 `.rpi/settings.json` 的 `sandbox` 块（只收紧）；CLI 覆盖经环境变量共享
 - [x] broker 强制 `readonly`：`approve` 与所有变更操作都拒绝，授权不能覆盖
 - [x] 配置形状检查：嵌套 readonly / 缺失 inode / allowFileWrites 冲突给出警告，`required` 拒绝
 - [x] 模型提示：`before_agent_start` 追加可写根、`EACCES` 语义与授权路径，避免模型误判为权限问题

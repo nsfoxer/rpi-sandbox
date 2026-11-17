@@ -51,9 +51,9 @@ pub use path::{
     absolute_lexical, has_nul, lexical_normalize, normalize_and_resolve, validate_local_path,
 };
 pub use policy::{
-    compile_policy, expand_configured_path, home_dir, home_dir_from, load_settings_file, temp_dir,
-    temp_dir_from, Access, ApprovalSettings, PathRule, PolicyContext, PolicyOverrides, ReadOnlyGap,
-    SandboxMode, SandboxPolicy, SandboxSettings,
+    compile_policy, expand_configured_path, home_dir, home_dir_from, load_sandbox_block,
+    load_settings_document, temp_dir, temp_dir_from, Access, ApprovalSettings, PathRule,
+    PolicyContext, PolicyOverrides, ReadOnlyGap, SandboxMode, SandboxPolicy, SandboxSettings,
 };
 pub use probe::{probe, SandboxBackend as SandboxBackendKind, SandboxSupport};
 pub use protocol::BrokerError;

@@ -33,10 +33,14 @@ readonly  >  writable  >  默认只读
 
 | 位置 | 作用 | 权限 |
 |---|---|---|
-| `~/.rpi/agent/sandbox.json` | 全局策略 | 可增删可写路径、可关闭沙箱 |
-| `<cwd>/.rpi/sandbox.json` | 项目策略 | **只能追加 `readonly`，不能放宽或关闭** |
+| `~/.rpi/agent/settings.json` 的 `sandbox` 块 | 全局策略 | 可增删可写路径、可关闭沙箱 |
+| `<cwd>/.rpi/settings.json` 的 `sandbox` 块 | 项目策略 | **只能追加 `readonly`，不能放宽或关闭** |
 | 命令行参数 | 本次运行 | 与全局同权；用户显式意图 |
 | 环境变量 `RPI_SANDBOX=0` | 本次运行关闭 | 用户显式意图 |
+
+`sandbox` 是 `settings.json` 的一个普通对象；文件里的其它字段由 rpi 自己使用。
+没有 `sandbox` 块时使用内置默认值：`enabled: true`、`mode: required`、可写 `cwd` /
+临时目录 / 会话目录，审批默认开启。
 
 路径展开使用 `${cwd}` / `${home}` / `${tmp}` 与 `~`。`${home}` 在 Windows 上取
 `USERPROFILE`（`HOME` 在 MSYS2 下可能是 `/c/Users/...`，不是合法 Windows 路径），
@@ -50,18 +54,20 @@ Windows 后端（MXC）的读范围是**显式白名单**：除了系统默认�
 
 ```jsonc
 {
-  "enabled": true,
-  "mode": "auto",
-  "writable": ["${cwd}", "${tmp}", "${cwd}/.rpi"],
-  "readonly": [
-    "${home}/.ssh",
-    "${home}/.aws",
-    "${home}/.gnupg",
-    "${home}/.rpi/agent"
-  ],
-  "allowFileWrites": ["/dev/null", "/dev/tty"],
-  "approval": { "enabled": true, "defaultScope": "session" },
-  "auditLog": "${home}/.rpi/audit/sandbox.jsonl"
+  "sandbox": {
+    "enabled": true,
+    "mode": "auto",
+    "writable": ["${cwd}", "${tmp}", "${cwd}/.rpi"],
+    "readonly": [
+      "${home}/.ssh",
+      "${home}/.aws",
+      "${home}/.gnupg",
+      "${home}/.rpi/agent"
+    ],
+    "allowFileWrites": ["/dev/null", "/dev/tty"],
+    "approval": { "enabled": true, "defaultScope": "session" },
+    "auditLog": "${home}/.rpi/audit/sandbox.jsonl"
+  }
 }
 ```
 
@@ -73,7 +79,9 @@ readonly 会让沙箱内的 `git commit` 失败，因为 git 需要写 `index` �
 
 ```jsonc
 {
-  "readonly": ["${cwd}/secrets", "${cwd}/.env"]
+  "sandbox": {
+    "readonly": ["${cwd}/secrets", "${cwd}/.env"]
+  }
 }
 ```
 

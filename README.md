@@ -62,18 +62,22 @@ rpis -- --help                        # 其余参数原样转发给 rpi
 
 ## 配置
 
-全局 `~/.rpi/agent/sandbox.json`，项目 `<cwd>/.rpi/sandbox.json`（只能收紧）：
+配置写在 rpi 的 `settings.json` 里，沙箱只读取其中的 `sandbox` 对象：
+全局 `~/.rpi/agent/settings.json`，项目 `<cwd>/.rpi/settings.json`（只能收紧）。
 
 ```json
 {
-  "enabled": true,
-  "mode": "required",
-  "writable": ["${cwd}", "${tmp}"],
-  "readonly": ["${home}/.ssh", "${home}/.aws"],
-  "approval": { "enabled": true, "defaultScope": "session" }
+  "sandbox": {
+    "enabled": true,
+    "mode": "required",
+    "writable": ["${cwd}", "${tmp}"],
+    "readonly": ["${home}/.ssh", "${home}/.aws"],
+    "approval": { "enabled": true, "defaultScope": "session" }
+  }
 }
 ```
 
+- 没有 `sandbox` 块时使用默认值：`required`、`cwd` / 临时目录 / 会话目录可写、审批开启。
 - `readonly` 永远优先于 `writable`。
 - 项目配置不能扩大可写范围，也不能关闭沙箱。
 - 相对路径相对于 `cwd`；支持 `${cwd}`、`${tmp}`、`${home}`。

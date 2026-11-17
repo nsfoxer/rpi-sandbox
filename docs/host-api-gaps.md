@@ -59,7 +59,7 @@
 ### 1.6 配置与持久化
 
 - 扩展可读取 `RPI_CODING_AGENT_DIR` / 会话路径等环境变量；
-- 可自行读写 `~/.rpi/agent/sandbox.json`、审计文件和授权持久化文件；
+- 可自行读取 `~/.rpi/agent/settings.json` 的 `sandbox` 块、审计文件和授权持久化文件；
 - 写入受整进程沙箱约束时，需要把这些路径加入 launcher 的可写白名单（或通过 broker 写）。
 
 **结论**：不需要 host 的文件存储 API。

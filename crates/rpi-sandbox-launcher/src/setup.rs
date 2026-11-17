@@ -13,9 +13,9 @@ use rpi_sandbox_core::backend::{
 use rpi_sandbox_core::protocol::env;
 use rpi_sandbox_core::state::policy_snapshot_path;
 use rpi_sandbox_core::{
-    compile_policy, load_settings_file, normalize_and_resolve, BrokerConfig, PathRule,
-    PolicyContext, PolicyOverrides, ReadOnlyGap, SandboxMode, SandboxPolicy, SandboxSettings,
-    SandboxSupport, PROTOCOL_VERSION,
+    compile_policy, load_sandbox_block, load_settings_document, normalize_and_resolve,
+    BrokerConfig, PathRule, PolicyContext, PolicyOverrides, ReadOnlyGap, SandboxMode,
+    SandboxPolicy, SandboxSettings, SandboxSupport, PROTOCOL_VERSION,
 };
 
 use crate::args::{maintenance_bypass, Args};
@@ -383,18 +383,28 @@ fn target_requests_extensions(target: &[String]) -> bool {
 
 /// Compile the effective policy for this run.
 pub fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<PathBuf>), String> {
-    let default_config = agent_dir().map(|dir| dir.join("sandbox.json"));
+    build_policy_with_agent(args, cwd, agent_dir().as_deref())
+}
+
+/// Compile the policy with an explicit agent directory (tests avoid the real
+/// `~/.rpi/agent`).
+fn build_policy_with_agent(
+    args: &Args,
+    cwd: &Path,
+    agent: Option<&Path>,
+) -> Result<(SandboxPolicy, Option<PathBuf>), String> {
+    let default_config = agent.map(|dir| dir.join("settings.json"));
     let config_path = args.config.clone().or(default_config);
     let global = match &config_path {
         Some(path) => {
             if args.config.is_some() && !path.exists() {
-                return Err(format!("sandbox settings {} do not exist", path.display()));
+                return Err(format!("settings file {} does not exist", path.display()));
             }
-            load_settings_file(path)?
+            load_sandbox_block(path, args.config.is_some())?
         }
         None => None,
     };
-    let project = load_settings_file(&cwd.join(".rpi/sandbox.json"))?;
+    let project = load_sandbox_block(&cwd.join(".rpi/settings.json"), false)?;
 
     let enabled = args
         .enabled
@@ -412,12 +422,11 @@ pub fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<Pa
         allow_file_writes: Vec::new(),
     };
 
-    let agent = agent_dir();
     let mut auto_writable = vec![cwd.to_path_buf()];
-    if let Some(session_dir) = resolve_session_dir(args, cwd, agent.as_deref()) {
+    if let Some(session_dir) = resolve_session_dir(args, cwd, agent) {
         auto_writable.push(session_dir);
     }
-    if let Some(agent) = &agent {
+    if let Some(agent) = agent {
         auto_writable.push(agent.join("update-check.json"));
         auto_writable.push(agent.join(".resource-lease"));
     }
@@ -434,7 +443,7 @@ pub fn build_policy(args: &Args, cwd: &Path) -> Result<(SandboxPolicy, Option<Pa
     // the bookkeeping files may not exist yet (the launcher creates them just
     // before compiling the backend plan). Force them to file rules: a directory
     // rule on a regular file makes Landlock reject the whole plan with EINVAL.
-    force_bookkeeping_file_rules(&mut policy, agent.as_deref());
+    force_bookkeeping_file_rules(&mut policy, agent);
     if let Some(audit) = &args.audit {
         policy.audit_log = Some(resolve_against(audit, cwd));
     }
@@ -510,55 +519,17 @@ fn session_dir_from_target(target: &[String], cwd: &Path) -> Option<PathBuf> {
 
 /// `sessionDir` from the global settings file, best effort.
 ///
-/// The host accepts `//` line comments in `settings.json`, so a strict parse
-/// failure is retried after stripping comments. A malformed or absent file just
-/// yields `None`; the default session directory is under the cwd rule anyway.
+/// The shared loader accepts the host's `//` line comments. A malformed or
+/// absent file just yields `None`; the default session directory is under the
+/// cwd rule anyway.
 fn settings_session_dir(agent: Option<&Path>, cwd: &Path) -> Option<PathBuf> {
     let path = agent?.join("settings.json");
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(value) => value,
-        Err(_) => serde_json::from_str(&strip_line_comments(&text)).ok()?,
-    };
+    let value = load_settings_document(&path).ok().flatten()?;
     let raw = value.get("sessionDir")?.as_str()?.trim();
     if raw.is_empty() {
         return None;
     }
     Some(resolve_against(Path::new(raw), cwd))
-}
-
-/// Remove `//` line comments that are outside a double-quoted string.
-///
-/// Mirrors the host's settings parser so a commented `settings.json` still
-/// yields `sessionDir`.
-fn strip_line_comments(text: &str) -> String {
-    text.lines()
-        .map(|line| match find_line_comment(line) {
-            Some(index) => line[..index].to_string(),
-            None => line.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn find_line_comment(line: &str) -> Option<usize> {
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, ch) in line.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if in_string => escaped = true,
-            '"' => in_string = !in_string,
-            '/' if !in_string && line.as_bytes().get(index + 1) == Some(&b'/') => {
-                return Some(index);
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Create the runtime files and directories the policy grants write access to.
@@ -952,7 +923,7 @@ mod tests {
             "--session-dir".to_string(),
             session.to_string_lossy().into_owned(),
         ];
-        let (policy, _) = build_policy(&args, dir.path()).unwrap();
+        let (policy, _) = build_policy_with_agent(&args, dir.path(), None).unwrap();
         assert!(
             policy
                 .writable
@@ -960,6 +931,93 @@ mod tests {
                 .any(|rule| rule.path() == normalize_and_resolve(&session)),
             "the forwarded --session-dir must be writable"
         );
+    }
+
+    #[test]
+    fn build_policy_uses_sensible_defaults_without_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let args = Args::default();
+        let (policy, path) = build_policy_with_agent(&args, dir.path(), Some(&agent)).unwrap();
+        assert_eq!(path, Some(agent.join("settings.json")));
+        assert!(policy.enabled);
+        assert_eq!(policy.mode, SandboxMode::Required);
+        assert!(policy.approval.is_enabled());
+        assert!(policy
+            .writable
+            .iter()
+            .any(|rule| rule.path() == normalize_and_resolve(dir.path())));
+    }
+
+    #[test]
+    fn build_policy_reads_the_settings_sandbox_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let secrets = dir.path().join("secrets");
+        std::fs::create_dir_all(&agent).unwrap();
+        let settings = serde_json::json!({
+            "sandbox": {
+                "mode": "auto",
+                "readonly": [secrets.to_string_lossy()],
+            }
+        });
+        std::fs::write(
+            agent.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let args = Args::default();
+        let (policy, path) = build_policy_with_agent(&args, dir.path(), Some(&agent)).unwrap();
+        assert_eq!(path, Some(agent.join("settings.json")));
+        assert_eq!(policy.mode, SandboxMode::Auto);
+        assert!(policy
+            .readonly
+            .iter()
+            .any(|rule| rule.path() == normalize_and_resolve(&secrets)));
+    }
+
+    #[test]
+    fn explicit_config_requires_a_sandbox_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(&settings, r#"{"provider": "x"}"#).unwrap();
+        let mut args = Args::default();
+        args.config = Some(settings);
+        let error = build_policy_with_agent(&args, dir.path(), None).unwrap_err();
+        assert!(error.contains("sandbox"), "{error}");
+    }
+
+    #[test]
+    fn project_settings_can_only_tighten() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join(".rpi");
+        let secrets = dir.path().join("secrets");
+        std::fs::create_dir_all(&project).unwrap();
+        let settings = serde_json::json!({
+            "sandbox": {
+                "enabled": false,
+                "writable": ["/srv/wide"],
+                "readonly": [secrets.to_string_lossy()],
+            }
+        });
+        std::fs::write(
+            project.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let args = Args::default();
+        let (policy, _) = build_policy_with_agent(&args, dir.path(), None).unwrap();
+        assert!(policy.enabled, "a project may not disable the sandbox");
+        assert!(!policy
+            .writable
+            .iter()
+            .any(|rule| rule.path() == Path::new("/srv/wide")));
+        assert!(policy
+            .readonly
+            .iter()
+            .any(|rule| rule.path() == normalize_and_resolve(&secrets)));
     }
 
     #[test]

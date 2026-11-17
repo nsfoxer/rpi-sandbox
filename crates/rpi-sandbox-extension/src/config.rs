@@ -1,7 +1,7 @@
 //! Extension configuration and effective policy.
 //!
 //! The extension compiles the same files the launcher used (the launcher
-//! exports its global config path as `RPI_SANDBOX_CONFIG`), plus the project
+//! exports its global settings path as `RPI_SANDBOX_CONFIG`), plus the project
 //! file, which can only tighten. The compiled policy is advisory for tool
 //! gating; the kernel boundary still comes from the launcher.
 
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use rpi_sandbox_core::protocol::env as protocol_env;
 use rpi_sandbox_core::{
-    compile_policy, load_settings_file, normalize_and_resolve, PolicyContext, PolicyOverrides,
+    compile_policy, load_sandbox_block, normalize_and_resolve, PolicyContext, PolicyOverrides,
     SandboxPolicy, SandboxSettings,
 };
 
@@ -52,19 +52,20 @@ impl Config {
             std::env::var(protocol_env::PROFILE).unwrap_or_else(|_| "default".to_string());
         let config_path = std::env::var_os(protocol_env::CONFIG)
             .map(PathBuf::from)
-            .or_else(|| agent_dir().map(|dir| dir.join("sandbox.json")));
+            .or_else(|| agent_dir().map(|dir| dir.join("settings.json")));
 
         let snapshot = load_snapshot();
-        let global = config_path
-            .as_deref()
-            .and_then(|path| match load_settings_file(path) {
-                Ok(settings) => settings,
-                Err(error) => {
-                    eprintln!("warning: sandbox: {error}; ignoring the global policy");
-                    None
-                }
-            });
-        let project = match load_settings_file(&cwd.join(".rpi/sandbox.json")) {
+        let global =
+            config_path
+                .as_deref()
+                .and_then(|path| match load_sandbox_block(path, false) {
+                    Ok(settings) => settings,
+                    Err(error) => {
+                        eprintln!("warning: sandbox: {error}; ignoring the global policy");
+                        None
+                    }
+                });
+        let project = match load_sandbox_block(&cwd.join(".rpi/settings.json"), false) {
             Ok(settings) => settings,
             Err(error) => {
                 eprintln!("warning: sandbox: {error}; ignoring the project policy");
