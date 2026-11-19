@@ -169,8 +169,9 @@ pub fn parse_answer(answer: &Value) -> Answer {
 pub fn ask(host: &dyn DialogHost, request: &PermissionRequest) -> Answer {
     let opened = match host.dialog(DialogAction::Open, &envelope(request)) {
         Ok(value) => value,
-        Err(error) => {
-            eprintln!("sandbox: approval denied ({error})");
+        Err(_) => {
+            // A headless/transport failure denies the request. Do not write to
+            // stderr: the TUI is already on the alternate screen.
             return Answer::Deny;
         }
     };

@@ -11,10 +11,10 @@ rpis.exe（不受限）
  2. 编译 MXC 计划（write / read / deny 路径）
  3. 创建命名管道 broker（DACL 授予当前用户 + ALL APPLICATION PACKAGES）
  4. 构造 ContainerRequest：
-      containment    = Process（Windows 解析为 ProcessContainer/PSEC）
+      containment    = ProcessContainer（PSEC）+ capabilities=registryRead
       filesystem     = readwrite_paths / readonly_paths（readonly 合并于此）
       network.egress = Allow
-      ui             = disable=false
+      ui             = disable=false, clipboard=all
       stdio          = Inherit（TUI 直接用当前终端）
  5. spawn → 等待 → 透传退出码
 ```
@@ -87,15 +87,22 @@ MXC 的 egress 默认是 **Deny**，实测不设置时 `curl` 连 DNS 都失败�
 
 `UiPolicy` 默认 `disable = true` 会移除 Win32k。`rpi.exe` 静态导入
 `ole32/USER32/SHELL32`，而 `ole32.dll` 在没有 Win32k 时 `DllMain` 返回失败
-（`0xC0000142` / 1114）。后端设置 `disable = false`，并保持剪贴板 `None`、
-输入注入 `false`。
+（`0xC0000142` / 1114）。后端设置 `disable = false`，并保持输入注入 `false`。
+
+剪贴板设为 `all`（不加 `UILIMIT_READCLIPBOARD/WRITECLIPBOARD`），但 PSEC 把进程
+放在 Low integrity，**Win32 剪贴板本身仍不可访问**。TUI 的 `/copy` 在 `arboard`
+失败后回退到 OSC 52，由终端写剪贴板；不支持 OSC 52 的终端仍然无法复制。
+
+`isolation` 保持默认 `container`。放宽到 `desktop` 会去掉
+`UILIMIT_HANDLES|GLOBALATOMS`，但对 MSYS2 没有帮助（见已知限制），因此不采用。
 
 ## 5. broker 与命名管道
 
 - 端点：`\\.\pipe\rpi-sandbox-<pid>-<nonce>`；
 - DACL：当前用户 + `S-1-15-2-1`（`ALL APPLICATION PACKAGES`）。
-  MXC 的 workload 运行在 AppContainer 中，仅授予交互用户的管道 DACL 会被拒绝
-  （`os error 5`）；加入 `ALL APPLICATION PACKAGES` 后扩展可正常握手；
+  MXC 的 workload 使用 AppContainer 风格的命名对象隔离和低完整性令牌，
+  仅授予交互用户的管道 DACL 会被拒绝（`os error 5`）；加入
+  `ALL APPLICATION PACKAGES` 后扩展可正常握手；
 - 协议与 Unix 完全相同（JSON Lines），代码路径共用 `BrokerService`；
 - 监听端在容器启动前创建；broker 线程 `accept` 一次并服务到断开；
 - 已知限制：同步命名管道没有 per-call 超时；只允许一个活动连接，
@@ -122,6 +129,8 @@ MXC 继承宿主环境，但 `rpis` 可能运行在 MSYS2 下（`PATH=/usr/local
 | 网络全放行 | 与旧后端一致；MXC 支持 egress 规则，后续可按策略收紧 |
 | 读白名单 | 需要显式列出；`rpis` 自动加卷根，因此读范围较宽 |
 | 单管道实例 | 扩展重复加载时第二次连接失败（见 §5） |
+| **MSYS2 / Cygwin 不可用** | PSEC 把进程放在 Low integrity，`msys-2.0.dll` 用绝对 NT 路径创建 `\BaseNamedObjects\msys-2.0*` 被拒（`microsoft/mxc#1061`）。文件系统、capability、UI 策略都无法放行；`msys2-bash` 插件会返回明确错误，需用 `rpis --no-sandbox` 或 Linux 后端 |
+| **Win32 剪贴板不可用** | Low integrity 拒绝 `OpenClipboard`；TUI `/copy` 回退到 OSC 52，需终端支持 |
 | 前台退出会终止子进程 | MXC 文档行为；对 rpi 退出可接受 |
 | SDK 版本 | 使用 `mxc-sdk` 1.1；升级需重新验证 |
 
@@ -132,7 +141,8 @@ MXC 继承宿主环境，但 `rpis` 可能运行在 MSYS2 下（`PATH=/usr/local
 | 写根内写入 | ✅ |
 | 已列出的读根可读；未列出目录不可读 | ✅ |
 | 写根外写入 / 删除 / truncate | ✅ `Access is denied (os error 5)` |
-| `bash`/子进程继承限制 | ✅（`spawn-write` 探针） |
+| `bash`/子进程继承限制 | ✅ 原生子进程（`cmd`/PowerShell）继承限制 |
+| MSYS2 / Cygwin 子进程 | ❌ `0xC0000142`（`microsoft/mxc#1061`，无配置可解） |
 | `readonly` 子目录（`.git/hooks`） | ✅ 可读；写/删除被拒 |
 | broker 握手 / 授权写 / revoke（命名管道） | ✅ |
 | 退出码透传 | ✅ |

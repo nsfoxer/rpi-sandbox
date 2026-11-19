@@ -124,6 +124,14 @@ rpis -- --help                        # 其余参数原样转发给 rpi
   `auto` 继续但状态显示 `partial`，`bash` 仍可直接写该路径（broker / 工具层会拦截）。
   把只读路径移到可写根之外，或接受 `partial`。
 - **Windows MXC**：`readonly` 是内核级只读（可读、不可写、不可新建/删除）。
+- **Windows 上 MSYS2 不可用**：PSEC 把进程放在 Low integrity，`msys-2.0.dll`
+  无法创建 `\BaseNamedObjects\msys-2.0*`（`microsoft/mxc#1061`），所有 MSYS2 /
+  Cygwin 程序都会 `0xC0000142`。文件系统、capability、UI 策略都无法放行；
+  `msys2-bash` 插件会返回明确错误。需要 MSYS2 时用 `rpis --no-sandbox`，或改用
+  Linux 后端。原生 Windows 程序（PowerShell / cmd / git.exe / node）不受影响。
+- **Windows 剪贴板**：Low integrity 拒绝 `OpenClipboard`；TUI `/copy` 在 `arboard`
+  失败后回退到 OSC 52，由终端写剪贴板（Windows Terminal / Alacritty 等支持，
+  不支持 OSC 52 的终端仍无法复制）。
 - **威胁模型**：同进程的第三方插件与扩展共享 PID，仍在 TCB 内；要防它需要 broker 在
   沙箱外直接展示审批 UI，v1 不做。
 - **macOS**：后端未实现，`rpis` 会直接报错。

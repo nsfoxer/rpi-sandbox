@@ -2,8 +2,9 @@
 //!
 //! The extension owns policy, approvals, audit (through the broker), commands,
 //! and status. It **never** creates the kernel boundary: that only happens in
-//! the launcher before `exec`. Without `RPI_SANDBOX_ACTIVE` it reports
-//! "not isolated" and gates tools advisory-only.
+//! the launcher before `exec`. Without `RPI_SANDBOX_ACTIVE` it does not
+//! activate at all, so a direct `rpi` run behaves as if the plugin were not
+//! installed: no prompt block, no tool gating, no diagnostics.
 //!
 //! Out-of-policy writes are approved through a `UiDialog` permission prompt and
 //! executed by the broker; the ToolCall handler then vetoes the built-in tool so
@@ -23,6 +24,7 @@ use rpi_plugin_sdk::{
     callbacks::Output, EventTag, PluginApi, StablePluginEvent, StbString, StbStringRef,
     EVENT_HANDLER_ABORT,
 };
+use rpi_sandbox_core::protocol::env as protocol_env;
 use rpi_sandbox_core::{ApprovalScope, BrokerClient, WriteOp};
 use serde_json::Value;
 
@@ -70,38 +72,39 @@ impl BrokerOps for ClientBroker<'_> {
 }
 
 rpi_plugin_sdk::export_plugin!(|api| {
+    // Only `rpis` sets RPI_SANDBOX_ACTIVE. A direct `rpi` run must behave as
+    // if this plugin were not installed: no host install, no prompt transform,
+    // no tool gating, and no diagnostics.
+    let launcher_active = std::env::var(protocol_env::ACTIVE)
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+    if !launcher_active {
+        return 0;
+    }
+
     host::install(api);
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = Config::from_env(&cwd);
 
-    if !config.isolated {
-        eprintln!(
-            "warning: rpi-sandbox: current process is NOT isolated; start rpi through \
-             rpi-sandbox for a kernel boundary (tool gating is advisory only)"
-        );
-    }
-
     let mut backend = None;
-    if config.isolated {
-        match config.socket.as_deref() {
-            Some(socket) => match BrokerClient::connect(socket) {
-                Ok(client) => {
-                    match client.hello(CRATE_NAME, env!("CARGO_PKG_VERSION")) {
-                        Ok(hello) => backend = hello.sandbox,
-                        Err(error) => {
-                            eprintln!("warning: sandbox: broker handshake failed: {error}")
-                        }
+    match config.socket.as_deref() {
+        Some(socket) => match BrokerClient::connect(socket) {
+            Ok(client) => {
+                match client.hello(CRATE_NAME, env!("CARGO_PKG_VERSION")) {
+                    Ok(hello) => backend = hello.sandbox,
+                    Err(error) => {
+                        eprintln!("warning: sandbox: broker handshake failed: {error}")
                     }
-                    let _ = BROKER.set(client);
                 }
-                Err(error) => {
-                    eprintln!("warning: sandbox: approval broker unavailable: {error}");
-                }
-            },
-            None => {
-                eprintln!("warning: sandbox: no broker socket; out-of-policy writes will be denied")
+                let _ = BROKER.set(client);
             }
+            Err(error) => {
+                eprintln!("warning: sandbox: approval broker unavailable: {error}");
+            }
+        },
+        None => {
+            eprintln!("warning: sandbox: no broker socket; out-of-policy writes will be denied")
         }
     }
 
@@ -243,14 +246,19 @@ fn handle_write_call(call: &ToolCall) -> i32 {
     let parsed: Value = match serde_json::from_str(&call.params) {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("sandbox: cannot parse write parameters: {error}");
+            // The TUI status line reports sandbox errors; stderr would land in
+            // the input area while the alternate screen is active.
+            host::set_status(
+                "sandbox",
+                &format!("⛔ cannot parse write parameters: {error}"),
+            );
             return 0;
         }
     };
     let (path, content) = match gate::parse_write(&parsed) {
         Ok(parsed) => parsed,
         Err(error) => {
-            eprintln!("sandbox: {error}");
+            host::set_status("sandbox", &format!("⛔ {error}"));
             return 0;
         }
     };
@@ -286,14 +294,17 @@ fn handle_edit_call(call: &ToolCall) -> i32 {
     let parsed: Value = match serde_json::from_str(&call.params) {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("sandbox: cannot parse edit parameters: {error}");
+            host::set_status(
+                "sandbox",
+                &format!("⛔ cannot parse edit parameters: {error}"),
+            );
             return 0;
         }
     };
     let (path, edits) = match gate::parse_edits(&parsed) {
         Ok(parsed) => parsed,
         Err(error) => {
-            eprintln!("sandbox: {error}");
+            host::set_status("sandbox", &format!("⛔ {error}"));
             return 0;
         }
     };
@@ -351,7 +362,8 @@ fn finish(outcome: Result<Outcome, String>) -> i32 {
             EVENT_HANDLER_ABORT
         }
         Err(error) => {
-            eprintln!("sandbox: {error}");
+            // Status line only: the TUI already owns the screen and stderr
+            // would be written into the input area.
             host::set_status("sandbox", &format!("⛔ {error}"));
             EVENT_HANDLER_ABORT
         }

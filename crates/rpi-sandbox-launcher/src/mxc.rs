@@ -72,6 +72,17 @@ impl SandboxBackend for MxcBackend {
 
         // 3. Container request.
         let command = command_line(&spec.program, &spec.args);
+        // Use the explicit ProcessContainer configuration instead of the
+        // abstract `Process` intent. The only change from the defaults is
+        // `registryRead`, which matches Codex's MXC profile and lets the
+        // Windows runtime read HKLM; `isolation` stays at the default
+        // `container`. Widening it to `desktop` does not help MSYS2: Cygwin
+        // calls NtCreateDirectoryObject with an absolute
+        // `\BaseNamedObjects\...` path, which AppContainer-style object
+        // redirection does not rewrite, so every msys-2.0.dll program still
+        // fails with STATUS_DLL_INIT_FAILED (microsoft/mxc#1061).
+        let mut process_container = v1::configs::ProcessContainerConfig::default();
+        process_container.capabilities = vec!["registryRead".to_owned()];
         let request = v1::ContainerRequest {
             filesystem: Some(v1::FilesystemPolicy {
                 readwrite_paths: display_paths(&plan.readwrite),
@@ -94,10 +105,13 @@ impl SandboxBackend for MxcBackend {
             // Win32k, so the container must keep windows enabled.
             ui: Some(v1::UiPolicy {
                 disable: false,
-                clipboard: v1::ClipboardPolicy::None,
+                // The TUI copies through the Win32 clipboard (arboard). Low
+                // integrity may still block it, but the job should not add a
+                // second restriction on top of that.
+                clipboard: v1::ClipboardPolicy::All,
                 allow_input_injection: false,
             }),
-            containment: v1::Containment::Process,
+            containment: v1::Containment::ProcessContainer(process_container),
             working_directory: Some(spec.cwd.display().to_string()),
             environment: Some(environment),
             inherit_default_environment: Some(true),
