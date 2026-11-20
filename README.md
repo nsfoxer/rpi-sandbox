@@ -123,18 +123,80 @@ rpis -- --help                        # 其余参数原样转发给 rpi
 - **Linux 嵌套 `readonly`**：Landlock 只能累加权限，不能扣除子树。`required` 拒绝启动；
   `auto` 继续但状态显示 `partial`，`bash` 仍可直接写该路径（broker / 工具层会拦截）。
   把只读路径移到可写根之外，或接受 `partial`。
-- **Windows MXC**：`readonly` 是内核级只读（可读、不可写、不可新建/删除）。
-- **Windows 上 MSYS2 不可用**：PSEC 把进程放在 Low integrity，`msys-2.0.dll`
-  无法创建 `\BaseNamedObjects\msys-2.0*`（`microsoft/mxc#1061`），所有 MSYS2 /
-  Cygwin 程序都会 `0xC0000142`。文件系统、capability、UI 策略都无法放行；
-  `msys2-bash` 插件会返回明确错误。需要 MSYS2 时用 `rpis --no-sandbox`，或改用
-  Linux 后端。原生 Windows 程序（PowerShell / cmd / git.exe / node）不受影响。
-- **Windows 剪贴板**：Low integrity 拒绝 `OpenClipboard`；TUI `/copy` 在 `arboard`
-  失败后回退到 OSC 52，由终端写剪贴板（Windows Terminal / Alacritty 等支持，
-  不支持 OSC 52 的终端仍无法复制）。
+
+Windows 后端的详细限制见下一节。
+
 - **威胁模型**：同进程的第三方插件与扩展共享 PID，仍在 TCB 内；要防它需要 broker 在
   沙箱外直接展示审批 UI，v1 不做。
 - **macOS**：后端未实现，`rpis` 会直接报错。
+
+## Windows（MXC）的限制
+
+Windows 后端是 MXC 的 **PSEC**（`processmodel.dll` + `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`），
+容器内的进程实际运行在 **AppContainer + Low integrity** 下。文件系统策略只是这个容器的一部分，
+无法单独剥离。
+
+实测环境：Windows 11 26H2（build 26300）、rpi 0.25.0、`mxc-sdk` 1.1。
+
+| 能力 | 结果 | 说明 |
+|---|---|---|
+| 写可写根（`${cwd}`、`${tmp}`） | ✅ | `readwrite_paths` |
+| 写 `readonly` 路径 | ✅ 拒绝 | `readonly_paths`，内核级，可读不可写 |
+| 写未列出的路径 | ✅ 拒绝 | `Access is denied (os error 5)` |
+| 读取 | 白名单 | 只暴露显式列出的根 + 系统默认 |
+| 多实例 | ✅ 隔离 | 每个容器独立 |
+| 启动 / 退出 | ✅ 约 0.5s | 与项目大小无关，不修改 ACL |
+| MSYS2 / Git Bash | ❌ | `0xC0000142`，见下 |
+| 桌面通知（Toast） | ❌ | Low IL 没有 packaged identity，句柄创建失败 |
+| Win32 剪贴板 | ❌ | Low IL 拒绝 `OpenClipboard` |
+| `>nul` / `NUL` | ❌（推断） | 设备对象在 Low IL 下不可写，未单独实测 |
+| 命名内核对象 | ⚠️ | `\BaseNamedObjects` 可读；创建受 AppContainer 重定向影响 |
+| 注册表 | ⚠️ | HKLM 只读（需 `registryRead`）；HKCU 大部分被重定向 |
+| `%LOCALAPPDATA%` | ⚠️ | 重定向到 `...\Packages\sandbox.{guid}\AC` |
+
+### MSYS2 / Cygwin
+
+`msys-2.0.dll` 用绝对 NT 路径调用 `NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0*)`，
+Low integrity 下被拒绝（`microsoft/mxc#1061`）：
+
+```text
+0 [main] bash: *** fatal error - NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0*): 0xC0000022
+```
+
+文件系统、capability、UI 策略都无法放行。所有 MSYS2 / Cygwin 程序都会失败；原生 Windows
+程序（PowerShell、cmd、原生 `git.exe`、node）不受影响。
+
+需要 bash 时：
+
+- `rpis --no-sandbox`（放弃隔离）；
+- 把 `rpi-opencode-extras` 的 `opencodeExtras.bash.kind` 改成 `powershell` 或 `cmd`；
+- 或使用 Linux 后端（Landlock）。
+
+### 为什么不能只保留文件系统限制
+
+```text
+文件系统策略  ⊂  AppContainer 容器  ⊂  PSEC
+```
+
+`capabilities`、`ui.isolation`、`clipboard` 都只是在 Low integrity 之上放宽某个类别，
+没有任何开关能取消 Low integrity 本身。因此「只限制文件系统、不影响其它」在 MXC 上不存在。
+
+已经验证过的替代路径：
+
+| 方案 | 结果 |
+|---|---|
+| `WRITE_RESTRICTED` + restricting SID | 文件系统正确，但 MSYS2 仍然失败（Cygwin 依赖 `NtSetInformationToken(TokenDefaultDacl)`，受限令牌禁止） |
+| 受限用户账户 | 未验证；需要管理员初始化，通知/剪贴板跨用户行为未知 |
+
+### 桌面通知与剪贴板
+
+沙箱内进程没有 packaged identity，`ToastNotificationManager` 无法创建 notifier；
+`%LOCALAPPDATA%` 也被重定向。当前实现会在首次失败后静默关闭通知。
+
+剪贴板同理：`ClipboardPolicy::All` 只去掉 job object 的 UI 限制，Low integrity 仍然
+拒绝 `OpenClipboard`。TUI `/copy` 回退到 OSC 52，需要终端支持。
+
+当前版本不做宿主能力代理（通知/剪贴板）；如有需要，会在 `rpis` 侧另开一个受限通道。
 
 ## 文档
 
